@@ -1,0 +1,391 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+settings:
+  name: generic
+  min_similarity: 0.65
+  repos:
+    -  https://github.com/mautic/mautic
+
+collections:
+  - id: daily
+    name: Daily Triage
+    dedup: false
+    description: To be emptied out daily
+    rules:
+      - issue-needs-comment
+      # Don't leave code reviews hanging
+      - pr-reviewable
+      # missing initial feedback
+      - issue-needs-type
+      - issue-needs-bundle
+      # reprioritize
+      - issue-new-with-reactions
+      - issue-new-with-many-commenters
+      # Don't forget our users
+      - issue-has-question
+      - issue-updated-kind-question
+
+  - id: weekly
+    name: Weekly Triage
+    dedup: true
+    description: To be emptied out weekly
+    rules:
+      - discuss
+      # Issues needing reprioritization
+      - many-reactions
+      - many-commenters
+      # Issues needing reprioritization
+      - issue-zombies
+      # PR's needing closure
+      - pr-approved-stale
+      - pr-unapproved-stale
+      - birthday
+      # Issues needing automated tests
+      - needs-tests
+      # Issues needing documentation
+      - needs-documentation
+
+  - id: quarterly
+    name: Quarterly Scrub
+    dedup: true
+    rules:
+      - question-old
+      - bugs-old
+      - enhancement-old
+      - other-old
+
+  - id: m2
+    name: Mautic 2 Triage
+    dedup: false
+    description: Items that need to be triaged for Mautic 2
+    rules:
+      - m2-m3-triage
+      - rebase-needed
+
+  - id: m3
+    name: Mautic 3 Triage
+    dedup: false
+    description: Issues affecting Mautic 3
+    rules:
+      - m3-triage
+      - m3-prs
+
+  - id: recv
+    name: "Receive queue"
+    description: >
+      Issues that may be waiting for our response
+  
+      NOTE: for this to work properly, GitHub token must have read access to read organization members
+    rules:
+      - question-recv
+      - bugs-recv
+      - enhancement-recv
+      - other-recv
+
+  - id: open
+    name: All open PR's and Issues that should be considered for repository stats (hidden)
+    used_for_statistics: true
+    hidden: true
+    rules:
+      - open-prs
+      - open-issues
+
+rules:
+  ### Daily Triage ####
+  issue-needs-comment:
+    name: "Unresponded by team, older than 7 days"
+    resolution: "Respond to the issue"
+    type: issue
+    filters:
+      - tag: "!commented"
+      - tag: "recv"
+      - created: +1w
+
+  # Don't leave code reviews hanging
+  pr-reviewable:
+    name: "Pull Requests: Review Ready"
+    resolution: "Review requests or mark them as do-not-merge/work-in-progress"
+    type: pull_request
+    filters:
+      - label: "!do-not-merge.*"
+      - label: "!.*Conflicts*"
+      - label: "!.*rebase"
+      - label: "!.*WIP"
+      - tag: "!requested-changes"
+      - tag: "!send"
+      - tag: "!commented"
+      
+      # Temporarily workaround inability to track PR eligibility
+      - updated: +1d
+
+  # Issues missing type
+  issue-needs-type:
+    name: "Issues missing type"
+    resolution: "Add a label denoting the type of issue"
+    type: issue
+    filters:
+      - label: "!.*(Bug|Enhancement|Translations|Feature Request|Regression|Deprecation|User Experience|User Interface).*"
+
+  # Issues missing bundle
+  issue-needs-bundle:
+    name: "Issues which are missing a label to denote the bundle they relate to"
+    resolution: "Add a label which represents the bundle this relates to"
+    type: issue
+    filters:
+      - label: "!.*(API|Campaign|Email builder|Forms|Plugin|Points & Scoring|Reports|Segments).*"
+
+  # Issues that may need reprioritized
+  issue-new-with-reactions:
+    name: "New, has multiple reactions, but not p0"
+    resolution: "Check if issue should be prioritized as p0"
+    type: issue
+    filters:
+      - reactions: ">2"
+      - created: -10d
+      - tag: "!send"
+      - label: "!priority/p0"
+
+  issue-new-with-many-commenters:
+    name: "New, has multiple commenters, but not p0"
+    resolution: "Check if issue should be prioritized as p0"
+    type: issue
+    filters:
+      - commenters: ">3"
+      - created: -10d
+      - tag: "!send"
+      - label: "!priority/p0"
+
+  # People with questions
+  issue-updated-kind-question:
+    name: "question label issue not responded to for over a week"
+    resolution: "Remove question label, or add a comment"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*question"
+      - tag: "!member-last"
+      - tag: "!contributor-last"
+      - responded: +8d
+
+  issue-has-question:
+    name: "Reporter asked a question over a week ago"
+    resolution: "Add an answer"
+    type: issue
+    filters:
+      - tag: recv-q
+      - tag: "!member-last"
+      - tag: "!contributor-last"
+      - responded: +7d
+
+ ####### Mautic 3 Triage #########
+  m3-triage:
+    name: "Issues affecting Mautic 3"
+    resolution: "Triage the issue"
+    type: issue
+    filters:
+      - label: ".*(Mautic 3|Persists on M3).*"
+
+  m3-prs:
+    name: "PRs for Mautic 3"
+    resolution: "Review the PR"
+    type: pull_requests
+    filters:
+      - label: ".*(Mautic 3|Persists on M3).*"
+
+####### Mautic 2 Triage #########
+  m2-m3-triage:
+    name: "Need to be triaged for relevancy to Mautic 3"
+    resolution: "Triage the issue"
+    type: issue
+    filters:
+      - label: "Triage M2/M3"
+
+  rebase-needed:
+    name: "Rebase required for Mautic 3"
+    resolution: "Rebase the PR or contact the original author"
+    type: pull_requests
+    filters:
+      - label: Need rebase for M3
+
+  ####### Weekly Triage #########
+  discuss:
+    name: "Items for discussion"
+    resolution: "Discuss and remove label"
+    filters:
+      - label: ".*discuss"
+      - state: "all"
+
+  needs-tests:
+    name: "Needs automated tests"
+    resolution: "Write automated tests"
+    type: pull_requests
+    filters:
+      - label: Needs Automated Tests
+
+  needs-documentation:
+    name: "Needs documentation"
+    resolution: "Write documentation"
+    type: pull_requests
+    filters:
+      - label: Needs Documentation
+
+  # issues needing reprioritization
+  many-reactions:
+    name: "many reactions, low priority, no recent comment"
+    resolution: "Bump the priority, add a comment"
+    filters:
+      - reactions: ">3"
+      - reactions-per-month: ">1"
+      - label: "!priority/p0"
+      - label: "!priority/p1"
+      - responded: +60d
+
+  many-commenters:
+    name: "many commenters, low priority, no recent comment"
+    resolution: "Consider increasing priority"
+    type: issue
+    filters:
+      - commenters: ">3"
+      - commenters-per-month: ">1.9"
+      - created: "+30d"
+      - label: "!priority/p0"
+      - label: "!priority/p1"
+      - tag: "!member-last"
+      - responded: "+60d"
+
+  issue-zombies:
+    name: "Screaming into the void"
+    resolution: "Reopen, or ask folks to open a new issue"
+    type: issue
+    filters:
+      - state: closed
+      - comments-while-closed: ">1"
+      - updated: "-14d"
+      - tag: "!member-last"
+
+  # Issues needing closure
+  birthday:
+    name: "Forgotten Birthdays - over a year old, no response in 6 months"
+    resolution: "Close or comment on what it would take to address this issue"
+    filters:
+      - created: +365d
+      - responded: +180d
+
+  # PR's needing closure
+  pr-approved-stale:
+    name: "Pull requests: Approved and getting old"
+    type: pull_request
+    filters:
+      - label: "!do-not-merge.*"
+      - label: "!needs-rebase"
+      - label: "approved"
+      - updated: +5d
+      - responded: +2d
+
+  pr-unapproved-stale:
+    name: "Pull Requests: Stale"
+    resolution: "Add comment and/or close PR"
+    type: pull_request
+    filters:
+      - created: +20d
+      - updated: +5d
+      - responded: +2d
+  
+  ## Bug Scrub ##
+  question-old:
+    name: "Questions that have been open for >3 weeks"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - responded: +7d
+      - created: +21d
+      - label: ".*question"
+
+  enhancement-old:
+    name: "Features that have been commented on within 90 days"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - responded: +1d
+      - created: +1d
+      - label: ".*(feature|enhancement|idea).*"
+
+  bugs-old:
+    name: "Bugs that have not been commented on within 90 days"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - label: ".*bug.*"
+      - responded: +1d
+      - created: +1d
+      - label: "!priority/awaiting-evidence"
+
+  other-old:
+    name: "Other items that have not been commented on within 90 days"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - responded: +1d
+      - created: +1d
+      - label: "!.*question"
+      - label: "!.*(feature|enhancement).*"
+      - label: "!.*bug"
+
+  # Receive queue
+  question-recv:
+    name: "Questions awaiting follow-up"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*question"
+
+  bugs-recv:
+    name: "Bugs awaiting follow-up"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*bug"
+
+  enhancement-recv:
+    name: "Features awaiting follow-up"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*(feature|enhancement|idea).*"
+
+  other-recv:
+    name: "Items that deserve a follow-up comment"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - responded: +30d
+      - label: "!.*(feature|enhancement).*"
+      - label: "!.*bug"
+      - label: ".*question"
+
+  # for stastistics generation
+  open-issues:
+    name: "Open Issues"
+    type: issue
+    state: open
+
+  open-prs:
+    name: "Open PRs"
+    type: pull_request
+    state: open
