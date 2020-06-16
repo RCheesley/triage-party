@@ -4,27 +4,28 @@
 
 Triage Party is a tool for triaging incoming GitHub issues for large open-source projects, built with the GitHub API.
 
-![screenshot](screenshot.png)
+![screenshot](docs/images/screenshot.png)
 
 Triage Party focuses on reducing response latency for incoming GitHub issues and PR's, and ensure that conversations are not lost in the ether. It was built from the [Google Container DevEx team](https://github.com/GoogleContainerTools)'s experience contributing to popular open-source projects, such as [minikube](https://github.com/kubernetes/minikube), [Skaffold](https://github.com/GoogleContainerTools/skaffold/), and [Kaniko](https://github.com/GoogleContainerTools/kaniko/).
 
 Triage Party is a stateless Go web application, configured via YAML. While it has been optimized for Google Cloud Run deployments, it's deployable anywhere due to its low memory footprint: even on a Raspberry Pi.
 
-## Features
+## Novel Features
 
-* Queries that are not possible on GitHub:
-  * conversation state (`tag: recv`, `tag: send`)
-  * how long since a project member responded (`responded: +15d`)
-  * duration (`updated: +30d`)
-  * regexp (`label: priority/.*`)
-  * reactions (`reactions: >=5`)
-  * comment popularity (`comments-per-month: >0.9`)
-  * duplicate detection
-  * ... and more!
-* Multi-player mode: Supports up to 20 simultaneous players in group triage
-* Easily open groups of issues into browser tabs (must allow pop-ups)
-* Queries across multiple repositories
-* "Shift-Reload" for live data pull
+* Conversation direction tracking and filtering
+* Multiplayer mode: Up to 20 simultaneous players in group triage
+* Query across GitHub projects or repositories
+* Duplicate issue detection
+* Filters that are not possible on GitHub:
+  * Follow-up latency by project members (`responded: +15d`)
+  * Reactions (`reactions: >=5`)
+  * Comment popularity (`comments-per-month: >0.9`)
+* Code review state-tracking (v1.2.0+)
+* Kanban dashboard (v1.2.0+)
+* Easily open groups of issues into browser tabs
+* YAML configuration for all pages, rules, and filters
+* GitHub Enterprise support (via `--github-api-url` cli flag)
+* Low latency (yet able to pull live data)
 
 ## Triage Party in production
 
@@ -36,144 +37,93 @@ See these fine examples in the wild:
 
 ## Requirements
 
-* [GitHub API token](https://help.github.com/en/articles/creating-a-personal-access-token-for-the-command-line)
-* Go v1.14 or higher
+* [GitHub API token with read access](https://help.github.com/en/articles/creating-a-personal-access-token-for-the-command-line)
 
-## Try it locally
+## Try it
 
-See what Triage Party would look like for an arbitrary repository:
+Store a GitHub token some place on disk:
+
+`echo YOUR_GENERATED_TOKEN > $HOME/.github-token`
+
+Run:
 
 ```shell
 go run cmd/server/main.go \
-  --github-token-file=<path to a file containing your github token> \
-  --config examples/generic-kubernetes.yaml \
+  --github-token-file=$HOME/.github-token \
+  --config config/examples/kubernetes.yaml \
   --repos kubernetes/sig-release
 ```
 
-Then visit [http://localhost:8080/](http://localhost:8080/)
-
-The first time you run Triage Party against a new repository, there will be a long delay as it will download data from GitHub. This data will be cached for subsequent runs. We're working to improve this latency.
-
-## Configuration
-
-### Creating a Github token file
-
-1. Create a GitHub token: https://help.github.com/en/github/authenticating-to-github/creating-a-personal-access-token-for-the-command-line
-2. Store token by pasting it into a text-file:
-`echo YOUR_GENERATED_TOKEN > /path/to/file`
-
-### Configuring collections and rules
-
-Each page within Triage Party is represented by a `collection`. Each collection references a list of `rules` that can be shared across collections. Here is a simple collection, which creates a page named `I like soup!`, containing two rules:
-
-```yaml
-collections:
-  - id: soup
-    name: I like soup!
-    rules:
-      - discuss
-      - many-reactions
-```
-
-The first rule, `discuss`, include all items labelled as `triage/discuss`, whether they are pull requests or issues, open or closed.
-
-
-```yaml
-rules:
-  discuss:
-    name: "Items for discussion"
-    resolution: "Discuss and remove label"
-    filters:
-      - label: triage/discuss
-      - state: "all"
-```
-
-The second rule, `many-reactions`, is more fine-grained. It is only focused on issues that have seen more than 3 comments, with an average of over 1 reaction per month, is not prioritized highly, and has not seen a response by a member of the project within 2 months:
-
-``` yaml
-  many-reactions:
-    name: "many reactions, low priority, no recent comment"
-    resolution: "Bump the priority, add a comment"
-    type: issue
-    filters:
-      - reactions: ">3"
-      - reactions-per-month: ">1"
-      - label: "!priority/p0"
-      - label: "!priority/p1"
-      - responded: +60d
-```
-
-For full example configurations, see `examples/*.yaml`. There are two that are particularly useful to get started:
-
-* [generic-project](examples/generic-project.yaml): uses label regular expressions that work for most GitHub projects
-* [generic-kubernetes](examples/generic-project.yaml): for projects that use Kubernetes-style labels, particularly  prioritization
-
-## Filter language
-
-```yaml
-# issue state (default is "open")
-- state:(open|closed|all)
-
-# GitHub label
-- label: [!]regex
-
-# Issue or PR title
-- title: [!]regex
-
-# Internal tagging: particularly useful tags are:
-# - recv: updated by author more recently than a project member
-# - recv-q: updated by author with a question
-# - send: updated by a project member more recently than the author
-- tag: [!]regex
-
-# GitHub milestone
-- milestone: string
-
-# Duration since item was created
-- created: [-+]duration   # example: +30d
-# Duration since item was updated
-- updated: [-+]duration
-# Duration since item was responded to by a project member
-- responded: [-+]duration
-
-# Number of reactions this item has received
-- reactions: [><=]int  # example: +5
-# Number of reactions per month on average
-- reactions-per-month: [><=]float
-
-# Number of comments this item has received
-- comments: [><=]int
-# Number of comments per month on average
-- comments-per-month: [><=]int
-# Number of comments this item has received while closed!
-- comments-while-closed: [><=]int
-
-# Number of commenters on this item
-- commenters: [><=]int
-# Number of commenters who have interactive with this item while closed
-- commenters-while-closed: [><=]int
-# Number of commenters tthis item has had per month on average
-- commenters-per-month: [><=]float
-```
-
-## Deploying Triage Party
-
-Docker:
+If you do not have [Go](https://golang.org/) installed, you can run Triage Party using Docker:
 
 ```shell
-env DOCKER_BUILDKIT=1 \
-  GITHUB_TOKEN_PATH=<path to your github token> \
-  docker build --tag=tp \
-  --build-arg CFG=examples/generic-project.yaml \
-  --secret id=github,src=$GITHUB_TOKEN_PATH .
-
-docker run -p 8080:8080 tp
+docker build --tag=tp .
+docker run -e GITHUB_TOKEN=$(cat $HOME/.github-token) -p 8080:8080 tp
 ```
 
-Cloud Run:
+You'll see logs emitted as Triage Party pulls content from GitHub. The first time a new repository is used, it will require some time (~45s in this case) to download the necessary data before minikube will render pages. Your new Triage Party site is now available at [http://localhost:8080/](http://localhost:8080/), but will initially block page loads until the required content has been downloaded. After the first run, pages are rendered from memory within ~5ms.
 
-See [examples/minikube-deploy.sh](examples/minikube-deploy.sh)
+## Usage Tips
 
-Kubernetes:
+Triage Party can be configured to accept any triage workflow you can imagine. Here are some tips:
 
-See [examples/generic-kubernetes.yaml](examples/generic-kubernetes.yaml)
+![box-with-arrow screenshot](docs/images/open-tab.png)
+
+* Use the blue `box-with-arrow` icon to open issues/pull requests into a new tab
+  * If nothing happens when clicked, your browser may be blocking pop-ups
+  * The notification to allow-popups for Triage Party may be hidden in the URL bar.
+* Rules work best when there is a documented resolution to remove it from the list
+* Pages work best if the process is defined so that the page is empty when triage is complete
+* If an non-actionable issue is shown as part of a daily or weekly triage, step back to tune your rules and/or define an appropriate resolution.
+
+## Multi-player mode
+
+![multi-player mode](docs/images/multiplayer.png)
+
+Use the drop-down labelled `Solo` on the top-right of any page to enable multi-player mode. In multi-player mode, the number of issues are split among the number of players you have configured. Since Triage Party is state-less, players are assigned via the remainder of the issue or PR divided by the total number of players. Here is a workflow that we have seen work well for triage parties:
+
+1. Wait for attendees to show up
+1. The meeting host selects the appropriate number of players, and shares the resulting Triage Party URL
+1. If someone is showing up later, we may leave a slot open and re-shard later if they do not appear
+1. The meeting host assigns each attendee a player number
+1. Players move section by section, using the "open items in new tabs" feature to quickly work through issues
+1. When a player does not have the context necessary to resolve an item, they present their screen and discuss it with the other players
+1. When a player leaves, the meeting host "re-shards", and all players select the updated player count in the drop-down
+
+NOTE: Multi-player works best if the "Resolution" field of each rule has a clear action to resolve the item and remove it from the list.
+
+## Kanban mode (NEW)
+
+In v1.2.0-beta.1 and newer, you can see a Kanban dashboard presentation for a collection. The columns are based on the rule the issue was found in, and the rows are based on the assignee. To see a real-world example:
+
+* [minikube kanban dashboard](http://tinyurl.com/minikube-kanban)
+* [minikube kanban config](https://github.com/google/triage-party/blob/0ad4f584ac0db13a96548d3eca9d05e91e0b1a40/config/examples/minikube.yaml#L108)
+
+CAVEATS: In v1.2.0-beta.1, the Kanban view only works for issues that are within a milestone. You'll need to add these configuration lines to the collection to make this view visable:
+
+
+```
+    display: kanban
+    overflow: 3
+    selector: milestone
+```
+
+You may also find `dedup: true` to be a useful configuration option. When v1.2.0 ships, all collections will be viewable as a Kanban dashboard using the /k/id URL path.
+
+## Data freshness
+
+![age screenshot](docs/images/age.png)
+
+With the default `Dockerfile`, Triage Party refreshes data at least every 8 minutes, settable using the `--max-refresh` flag. Triage Party will give popular pages a higher refresh rate, up to every 30 seconds by default (settable using `--min-refresh` flag). This default is conservative, allowing Triage Party to work with repositories containing 10,000 open issues without hitting GitHub API limits.
+
+Live data can be requested at any time by using forcing a refresh in their browser, typically by holding the Shift button as you reload the page. See   [forced refresh for your browser](https://en.wikipedia.org/wiki/Wikipedia:Bypass_your_cache#Bypassing_cache).
+
+You can see how fresh a pages data is by mousing-over the "unique items" text in the top-center of the page.
+
+## Documentation
+
+Thirsting for more? See:
+
+* [Configuration guide](docs/config.md)
+* [Deployment guide](docs/deploy.md)
+* [Persistent cache configuration](docs/persist.md)

@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/google/triage-party/pkg/hubbub"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // Collection represents a fully loaded YAML configuration
@@ -32,11 +32,18 @@ type Collection struct {
 	Dedup        bool     `yaml:"dedup,omitempty"`
 	Hidden       bool     `yaml:"hidden,omitempty"`
 	UsedForStats bool     `yaml:"used_for_statistics,omitempty"`
+
+	// Kanban option
+	Display  string `yaml:"display"`
+	Overflow int    `yaml:"overflow"`
+	Selector string `yaml:"selector"`
 }
 
 // The result of Execute
 type CollectionResult struct {
-	Time        time.Time
+	Collection *Collection
+	Time       time.Time
+
 	RuleResults []*RuleResult
 
 	Total             int
@@ -54,12 +61,13 @@ type CollectionResult struct {
 
 // ExecuteCollection executes a collection.
 func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan time.Time) (*CollectionResult, error) {
-	klog.Infof("-**>> Executing collection %q: %s", s.ID, s.RuleIDs)
+	klog.V(1).Infof("executing collection %q: %s", s.ID, s.RuleIDs)
 	start := time.Now()
 
 	os := []*RuleResult{}
 	seen := map[string]*Rule{}
 	seenRule := map[string]bool{}
+	var latestInput time.Time
 
 	for _, tid := range s.RuleIDs {
 		if seenRule[tid] {
@@ -76,23 +84,35 @@ func (p *Party) ExecuteCollection(ctx context.Context, s Collection, newerThan t
 
 		ro, err := p.ExecuteRule(ctx, t, seen, newerThan)
 		if err != nil {
-			return nil, fmt.Errorf("rule %q: %v", t.Name, err)
+			return nil, fmt.Errorf("rule %q: %w", t.Name, err)
+		}
+
+		if ro.LatestInput.After(latestInput) {
+			latestInput = ro.LatestInput
 		}
 
 		os = append(os, ro)
 	}
 
-	r := SummarizeCollectionResult(os)
-	r.Time = time.Now()
-	klog.Infof("<<< Collection %q took %s to execute", s.ID, time.Since(start))
+	r := SummarizeCollectionResult(&s, os)
+	r.Time = newerThan
+
+	// If we are lucky, our results may be newer than we asked for!
+	if latestInput.After(r.Time) {
+		r.Time = latestInput
+	}
+
+	klog.V(1).Infof("collection %q took %s", s.ID, time.Since(start))
 	return r, nil
 }
 
 // SummarizeCollectionResult adds together statistics about collection results {
-func SummarizeCollectionResult(os []*RuleResult) *CollectionResult {
+func SummarizeCollectionResult(s *Collection, os []*RuleResult) *CollectionResult {
 	klog.V(1).Infof("Summarizing collection result with %d rules...", len(os))
 
-	r := &CollectionResult{}
+	r := &CollectionResult{
+		Collection: s,
+	}
 
 	for _, oc := range os {
 		r.Total += len(oc.Items)
@@ -109,8 +129,8 @@ func SummarizeCollectionResult(os []*RuleResult) *CollectionResult {
 		r.TotalAccumulatedHoldDays += oc.TotalAccumulatedHoldDays
 
 	}
+
 	if r.Total == 0 {
-		klog.Warningf("no summary, total=0")
 		return r
 	}
 
@@ -122,36 +142,6 @@ func SummarizeCollectionResult(os []*RuleResult) *CollectionResult {
 
 func avgDayDuration(total float64, count int) time.Duration {
 	return time.Duration(int64(total/float64(count)*24)) * time.Hour
-}
-
-// Flush the search cache for a collection
-func (p *Party) FlushSearchCache(id string, olderThan time.Time) error {
-	s, err := p.LookupCollection(id)
-	if err != nil {
-		return err
-	}
-
-	flushed := map[string]bool{}
-	for _, tid := range s.RuleIDs {
-		t, err := p.LookupRule(tid)
-		if err != nil {
-			return err
-		}
-		for _, r := range t.Repos {
-			if !flushed[r] {
-				klog.Infof("Flushing search cache for %s ...", r)
-				org, project, err := parseRepo(r)
-				if err != nil {
-					return err
-				}
-				if err := p.engine.FlushSearchCache(org, project, olderThan); err != nil {
-					klog.Warningf("flush for %s/%s: %v", org, project, err)
-				}
-				flushed[r] = true
-			}
-		}
-	}
-	return nil
 }
 
 // ListCollections a fully resolved collections

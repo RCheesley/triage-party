@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// It's the Triage Party server!
+//
+// ** Basic example:
+//
+// go run main.go --github-token-file ~/.token --config minikube.yaml
+//
+// ** Using MySQL persistence:
+//
+// --persist-backend=mysql --persist-path="root:rootz@tcp(127.0.0.1:3306)/teaparty"
+//
+
 package main
 
 import (
@@ -26,84 +37,76 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/go-github/v31/github"
 	"golang.org/x/oauth2"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"github.com/google/triage-party/pkg/initcache"
+	"github.com/google/triage-party/pkg/persist"
 	"github.com/google/triage-party/pkg/site"
 	"github.com/google/triage-party/pkg/triage"
 	"github.com/google/triage-party/pkg/updater"
 )
 
 var (
+	// custom GitHub API URLs
+	githubAPIRawURL = flag.String("github-api-url", "", "GitHub API url to connect.  Please set this when you use GitHub Enterprise. This often is your GitHub Enterprise hostname. If the URL does not have the suffix \"/api/v3/\", it will be added automatically.")
+
 	// shared with tester
-	configPath      = flag.String("config", "", "configuration path")
-	initCachePath   = flag.String("init_cache", "", "Where to load the initial cache from (optional)")
+	configPath     = flag.String("config", "", "configuration path (defaults to searching for config.yaml)")
+	persistBackend = flag.String("persist-backend", "", "Cache persistence backend (disk, mysql, cloudsql)")
+	persistPath    = flag.String("persist-path", "", "Where to persist cache to (automatic)")
+
 	reposOverride   = flag.String("repos", "", "Override configured repos with this repository (comma separated)")
 	githubTokenFile = flag.String("github-token-file", "", "github token secret file, also settable via GITHUB_TOKEN")
 
 	// server specific
-	siteDir       = flag.String("site_dir", "site/", "path to site files")
-	thirdPartyDir = flag.String("3p_dir", "third_party/", "path to 3rd party files")
-	dryRun        = flag.Bool("dry_run", false, "run queries, don't start a server")
+	siteDir       = flag.String("site", "site/", "path to site files")
+	thirdPartyDir = flag.String("3p", "third_party/", "path to 3rd party files")
+	dryRun        = flag.Bool("dry-run", false, "run queries, don't start a server")
 	port          = flag.Int("port", 8080, "port to run server at")
-	siteName      = flag.String("site_name", "", "override site name from config file")
+	siteName      = flag.String("name", "", "override site name from config file")
+	number        = flag.Int("num", 0, "only display results for this GitHub numbe (debug)")
 
-	itemExpiry = flag.Duration("item_expiry", 12*time.Hour, "maximum time to cache GitHub search results")
-	orgExpiry  = flag.Duration("org_expiry", 30*12*time.Hour, "maximum time to cache GitHub organizational membership")
-
-	maxRefreshAge = flag.Duration("max_refresh_age", 15*time.Minute, "Maximum time between collection runs")
-	minRefreshAge = flag.Duration("min_refresh_age", 60*time.Second, "Minimum time between collection runs")
-
-	warnAge = flag.Duration("warn_age", 30*time.Minute, "Maximum time before warning about stale results. Recommended: 2*max_refresh_age")
+	maxRefresh = flag.Duration("max-refresh", 60*time.Minute, "Maximum time between collection runs")
+	minRefresh = flag.Duration("min-refresh", 60*time.Second, "Minimum time between collection runs")
 )
 
 func main() {
+	klog.InitFlags(nil)
 	flag.Parse()
-	kf := flag.NewFlagSet("klog", flag.ExitOnError)
-	klog.InitFlags(kf)
 
-	// Sync the glog and klog flags.
-	flag.CommandLine.VisitAll(func(f1 *flag.Flag) {
-		f2 := kf.Lookup(f1.Name)
-		if f2 != nil {
-			value := f1.Value.String()
-			f2.Value.Set(value)
-		}
-	})
-
-	if *configPath == "" {
-		klog.Exitf("--config is required")
+	cp := *configPath
+	if cp == "" {
+		cp = os.Getenv("CONFIG_PATH")
+	}
+	if cp == "" {
+		cp = findPath("config/config.yaml")
+		klog.Warningf("--config and CONFIG_PATH were empty, falling back to %s", cp)
 	}
 
 	ctx := context.Background()
 
-	client := github.NewClient(oauth2.NewClient(ctx, oauth2.StaticTokenSource(
+	client := triage.MustCreateGithubClient(*githubAPIRawURL, oauth2.NewClient(ctx, oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: triage.MustReadToken(*githubTokenFile, "GITHUB_TOKEN")},
 	)))
 
-	f, err := os.Open(findPath(*configPath))
+	f, err := os.Open(findPath(cp))
 	if err != nil {
-		klog.Exitf("open %s: %v", *configPath, err)
+		klog.Exitf("open %s: %v", cp, err)
 	}
 
-	cachePath := *initCachePath
-	if cachePath == "" {
-		cachePath = initcache.DefaultDiskPath(*configPath, *reposOverride)
+	c, err := persist.FromEnv(*persistBackend, *persistPath, cp, *reposOverride)
+	if err != nil {
+		klog.Exitf("unable to create persistence layer: %v", err)
 	}
-	klog.Infof("cache path: %s", cachePath)
 
-	c := initcache.New(initcache.Config{Type: "disk", Path: cachePath})
 	if err := c.Initialize(); err != nil {
-		klog.Exitf("initcache load to %s: %v", cachePath, err)
+		klog.Exitf("persist initialize for %s: %v", c, err)
 	}
 
 	cfg := triage.Config{
-		Client:          client,
-		Cache:           c,
-		ItemExpiry:      *itemExpiry,
-		OrgMemberExpiry: *orgExpiry,
+		Client:      client,
+		Cache:       c,
+		DebugNumber: *number,
 	}
 
 	if *reposOverride != "" {
@@ -112,7 +115,7 @@ func main() {
 
 	tp := triage.New(cfg)
 	if err := tp.Load(f); err != nil {
-		klog.Exitf("load from %s: %v", *configPath, err)
+		klog.Exitf("load from %s: %v", cp, err)
 	}
 
 	ts, err := tp.ListRules()
@@ -126,15 +129,10 @@ func main() {
 		sn = calculateSiteName(ts)
 	}
 
-	// Make sure save works
-	if err := c.Save(); err != nil {
-		klog.Exitf("initcache save to %s: %v", cachePath, err)
-	}
-
 	u := updater.New(updater.Config{
-		Party:         tp,
-		MinRefreshAge: *minRefreshAge,
-		MaxRefreshAge: *maxRefreshAge,
+		Party:      tp,
+		MinRefresh: *minRefresh,
+		MaxRefresh: *maxRefresh,
 		PersistFunc: func() error {
 			return c.Save()
 		},
@@ -142,7 +140,7 @@ func main() {
 
 	if *dryRun {
 		klog.Infof("Updating ...")
-		if err := u.RunOnce(ctx, true); err != nil {
+		if _, err := u.RunOnce(ctx, true); err != nil {
 			klog.Exitf("run failed: %v", err)
 		}
 		os.Exit(0)
@@ -155,7 +153,7 @@ func main() {
 		for sig := range sigc {
 			klog.Infof("signal caught: %v", sig)
 			if err := c.Save(); err != nil {
-				klog.Errorf("save errro: %v", err)
+				klog.Errorf("unable to save: %v", err)
 			}
 			os.Exit(0)
 		}
@@ -171,13 +169,14 @@ func main() {
 		BaseDirectory: findPath(*siteDir),
 		Updater:       u,
 		Party:         tp,
-		WarnAge:       *warnAge,
+		WarnAge:       (*maxRefresh * 2),
 		Name:          sn,
 	})
 
 	http.Handle("/third_party/", http.StripPrefix("/third_party/", http.FileServer(http.Dir(findPath(*thirdPartyDir)))))
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.Join(findPath(*siteDir), "static")))))
 	http.HandleFunc("/s/", s.Collection())
+	http.HandleFunc("/k/", s.Kanban())
 	http.HandleFunc("/", s.Root())
 
 	listenAddr := fmt.Sprintf(":%s", os.Getenv("PORT"))
@@ -228,5 +227,11 @@ func findPath(p string) string {
 			return tp
 		}
 	}
+
+	prod := filepath.Join("/app/", p)
+	if _, err := os.Stat(prod); err == nil {
+		return prod
+	}
+
 	return p
 }

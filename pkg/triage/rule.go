@@ -20,7 +20,8 @@ import (
 	"time"
 
 	"github.com/google/triage-party/pkg/hubbub"
-	"k8s.io/klog"
+	"github.com/google/triage-party/pkg/logu"
+	"k8s.io/klog/v2"
 )
 
 // Rule is a logical triage group
@@ -46,7 +47,10 @@ type RuleResult struct {
 	TotalCurrentHoldDays     float64
 	TotalAccumulatedHoldDays float64
 
-	Duplicates int
+	Duplicates map[string]bool
+
+	// LatestInput is the timestamp of the most recent input data
+	LatestInput time.Time
 }
 
 // SummarizeRuleResult adds together statistics about a pool of conversations
@@ -55,7 +59,7 @@ func SummarizeRuleResult(t Rule, cs []*hubbub.Conversation, seen map[string]*Rul
 
 	r := &RuleResult{
 		Rule:       t,
-		Duplicates: 0,
+		Duplicates: map[string]bool{},
 	}
 
 	if seen == nil {
@@ -70,8 +74,7 @@ func SummarizeRuleResult(t Rule, cs []*hubbub.Conversation, seen map[string]*Rul
 				}
 
 				klog.V(2).Infof("dupe: %s (now: %q, previous: %q)", c.URL, t.ID, dupeRule.ID)
-				c.Hidden = true
-				r.Duplicates++
+				r.Duplicates[c.URL] = true
 			}
 			r.Items = append(r.Items, c)
 			seen[c.URL] = &t
@@ -102,12 +105,9 @@ func SummarizeRuleResult(t Rule, cs []*hubbub.Conversation, seen map[string]*Rul
 
 // ExecuteRule executes a rule. seen is optional.
 func (p *Party) ExecuteRule(ctx context.Context, t Rule, seen map[string]*Rule, newerThan time.Time) (*RuleResult, error) {
-	if p.ItemExpiry == 0 {
-		return nil, fmt.Errorf("item expiry cannot be 0")
-	}
-
-	klog.Infof("executing rule %q for results newer than %s (stale_ok=%v, item expiry=%s)", t.ID, newerThan, p.acceptStaleResults, p.ItemExpiry)
+	klog.V(1).Infof("executing rule %q for results newer than %s", t.ID, logu.STime(newerThan))
 	rcs := []*hubbub.Conversation{}
+	var latest time.Time
 
 	for _, repo := range t.Repos {
 		org, project, err := parseRepo(repo)
@@ -117,15 +117,15 @@ func (p *Party) ExecuteRule(ctx context.Context, t Rule, seen map[string]*Rule, 
 
 		klog.V(2).Infof("%s -> org=%s project=%s", repo, org, project)
 
+		var ts time.Time
 		var cs []*hubbub.Conversation
 		switch t.Type {
 		case hubbub.Issue:
-
-			cs, err = p.engine.SearchIssues(ctx, org, project, t.Filters, newerThan)
+			cs, ts, err = p.engine.SearchIssues(ctx, org, project, t.Filters, newerThan)
 		case hubbub.PullRequest:
-			cs, err = p.engine.SearchPullRequests(ctx, org, project, t.Filters, newerThan)
+			cs, ts, err = p.engine.SearchPullRequests(ctx, org, project, t.Filters, newerThan)
 		default:
-			cs, err = p.engine.SearchAny(ctx, org, project, t.Filters, newerThan)
+			cs, ts, err = p.engine.SearchAny(ctx, org, project, t.Filters, newerThan)
 		}
 
 		if err != nil {
@@ -133,10 +133,15 @@ func (p *Party) ExecuteRule(ctx context.Context, t Rule, seen map[string]*Rule, 
 		}
 
 		rcs = append(rcs, cs...)
+		if ts.After(latest) {
+			latest = ts
+		}
 	}
 
 	klog.V(1).Infof("rule %q matched %d items", t.ID, len(rcs))
-	return SummarizeRuleResult(t, rcs, seen), nil
+	rr := SummarizeRuleResult(t, rcs, seen)
+	rr.LatestInput = latest
+	return rr, nil
 }
 
 // Return a fully resolved rule

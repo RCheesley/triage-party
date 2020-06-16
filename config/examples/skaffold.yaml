@@ -14,9 +14,9 @@
 
 settings:
   name: skaffold
-  min_similarity: 0.65
+  min_similarity: 0.8
   repos:
-    -  https://github.com/GoogleContainerTools/skaffold
+    - https://github.com/GoogleContainerTools/skaffold
 
 collections:
   - id: daily
@@ -130,6 +130,13 @@ collections:
       - fixit-bugs
       - fixit-other
 
+  - id: similar
+    name: Similar
+    description: Items which appear similar to one other. Review for duplicates or vague titles.
+    rules:
+      - similar-prs
+      - similar-issues
+
   - id: open
     name: All open PR's and Issues that should be considered for repository stats (hidden)
     used_for_statistics: true
@@ -172,52 +179,48 @@ rules:
       - label: "kind/bug"
 
   issue-p0-fix-slo:
-    name: "p0 bug, older than a week -- exceeds limit"
+    name: "p0 bug, prioritized for more than a week -- exceeds limit"
     resolution: "Downgrade to p1"
     type: issue
     filters:
       - label: "priority/p0"
-      - created: +1w
+      - prioritized: +1w
       - responded: +1d
       - label: "kind/bug"
 
   issue-p1-fix-slo:
-    name: "p1 bug, older than 6 weeks -- exceeds limit"
+    name: "p1 bug, prioritized more than 6 weeks -- exceeds limit"
     resolution: "Downgrade to p2"
     type: issue
     filters:
       - label: "priority/p1"
       - responded: +1d
-      - created: +6w
+      - prioritized: +6w
       - label: "kind/bug"
 
   issue-p2-fix-slo:
-    name: "p2 bug, older than 1 quarter -- exceeds limit"
+    name: "p2 bug, prioritized more than 1 quarter -- exceeds limit"
     resolution: "Downgrade to p3"
     type: issue
     filters:
       - label: "priority/p2"
-      - created: +12w
+      - prioritized: +12w
       - responded: +1d
       - label: "kind/bug"
 
   # Don't leave code reviews hanging
   pr-reviewable:
-    name: "Pull Requests: Review Ready"
+    name: "Needs Review, older than 1 day"
     resolution: "Review requests or mark them as do-not-merge/work-in-progress"
     type: pull_request
     filters:
       - label: "!do-not-merge.*"
-      - label: "!needs-rebase"
       - label: "!.*wip"
       - label: "!cncf-cla: no"
       - title: "!.*WIP.*"
       - tag: "!draft"
-      - tag: "!requested-changes"
-      - tag: "!send"
-      - tag: "!commented"
-      
-      # Temporarily workaround inability to track PR eligibility
+      - tag: "(new-commits|unreviewed)"
+      - tag: "recv"
       - updated: +1d
 
   # Issues missing initial feedback
@@ -237,7 +240,7 @@ rules:
       - label: "!area/.*"
       - label: "!meta/.*"
       # Open question: should this exclude questions?
-      # - label: "!kind/question"      
+      # - label: "!kind/question"
 
   issue-needs-priority:
     name: "Unprioritized bugs or features"
@@ -260,24 +263,28 @@ rules:
 
   # Issues that may need reprioritized
   issue-new-with-reactions:
-    name: "New, has multiple reactions, but not p0"
-    resolution: "Check if issue should be prioritized as p0"
+    name: "New, has multiple reactions, but not high priority"
+    resolution: "Prioritize as p0 or p1, or add discuss label"
     type: issue
     filters:
-      - reactions: ">2"
-      - created: -10d
-      - tag: "!send"
+      - reactions: ">3"
+      - created: -8d
+      - updated: -4d
       - label: "!priority/p0"
+      - label: "!priority/p1"
+      - label: "!triage/discuss"
 
   issue-new-with-many-commenters:
-    name: "New, has multiple commenters, but not p0"
-    resolution: "Check if issue should be prioritized as p0"
+    name: "New, has multiple commenters, but not high priority"
+    resolution: "Prioritize as p0 or p1, or add discuss label"
     type: issue
     filters:
       - commenters: ">3"
-      - created: -10d
-      - tag: "!send"
+      - created: -8d
+      - updated: -4d
       - label: "!priority/p0"
+      - label: "!priority/p1"
+      - label: "!triage/discuss"
 
   # Don't forget our users
   issue-updated-needs-info:
@@ -289,15 +296,15 @@ rules:
       - tag: recv
 
   issue-updated-has-question:
-      name: "Recently updated issue has open question"
-      resolution: "Add an answer"
-      type: issue
-      filters:
-        - tag: recv-q
-        - tag: "!member-last"
-        - tag: "!contributor-last"
-        - responded: +3d
-        - updated: -7d
+    name: "Recently updated issue has open question"
+    resolution: "Add an answer"
+    type: issue
+    filters:
+      - tag: recv-q
+      - tag: "!member-last"
+      - tag: "!contributor-last"
+      - responded: +3d
+      - updated: -7d
 
   ####### Weekly Triage #########
   discuss:
@@ -319,35 +326,35 @@ rules:
       - label: "kind/bug"
 
   issue-near-p0-fix-slo:
-    name: "p0 bug, older than 5d (near SLO boundary)"
+    name: "p0 bug, prioritized for longer than 5d (near SLO boundary)"
     resolution: "Downgrade to p1"
     type: issue
     filters:
       - label: "priority/p0"
-      - created: +5d
-      - created: -7d
+      - prioritized: +5d
+      - prioritized: -7d
       - responded: +1d
       - label: "kind/bug"
 
   issue-near-p1-fix-slo:
-    name: "p1 bug, older than 5 weeks (near SLO boundary)"
+    name: "p1 bug, prioritized for longer than 5 weeks (near SLO boundary)"
     resolution: "Downgrade to p2"
     type: issue
     filters:
       - label: "priority/p1"
-      - created: +5w
-      - created: -6w
+      - prioritized: +5w
+      - prioritized: -6w
       - label: "kind/bug"
       - responded: +1w
 
   issue-near-p2-fix-slo:
-    name: "p2 bug, older than 10 weeks (near SLO boundary)"
+    name: "p2 bug, prioritized for longer than 10 weeks (near SLO boundary)"
     resolution: "Downgrade to p3"
     type: issue
     filters:
       - label: "priority/p2"
-      - created: +10w
-      - created: -12w
+      - prioritized: +10w
+      - prioritized: -12w
       - label: "kind/bug"
       - responded: +1w
 
@@ -404,7 +411,7 @@ rules:
     type: issue
     filters:
       - label: needs-reproduction
-      - responded: +1w      
+      - responded: +1w
       - updated: +21d
 
   issue-stale-support:
@@ -456,7 +463,7 @@ rules:
       - updated: +5d
       - responded: +2d
       - label: "!triage/discuss"
-  
+
   # People with questions
   issue-has-question:
     name: "Reporter asked a question over a week ago"
@@ -617,6 +624,13 @@ rules:
       - label: "priority/p1"
 
   # Fix-It
+  fixit-prs:
+    name: "Fix-it PR's"
+    resolution: Review and merge!
+    type: pull_request
+    filters:
+      - label: "fixit"
+
   fixit-bugs:
     name: "Fix-it bugs"
     type: issue
@@ -642,11 +656,20 @@ rules:
       - label: "!kind/feature-request"
       - label: "!kind/bug"
 
-  fixit-prs:
-    resolution: Close or remove fixit label
+  ## Similar
+  similar-prs:
+    name: "Similar Pull Requests"
     type: pull_request
+    resolution: Close as duplicate or give a better title
     filters:
-      - label: "fixit"
+      - tag: similar
+
+  similar-issues:
+    name: "Similar Issues"
+    type: issue
+    resolution: Close as duplicate or give a better title
+    filters:
+      - tag: similar
 
   # for stastistics generation
   open-issues:

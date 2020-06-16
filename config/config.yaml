@@ -13,10 +13,24 @@
 # limitations under the License.
 
 settings:
-  name: generic
-  min_similarity: 0.65
+  name: generic-project
+  # On a scale of 0-1, how similar do two issues need to be to be tagged as "similar"
+  min_similarity: 0.75
+  # Repositories to query, can be overridden by -repos
   repos:
-    -  https://github.com/mautic/mautic
+    - https://github.com/photoprism/photoprism
+
+  # Who should automatically be considered a project member?
+  # See: https://developer.github.com/v4/enum/commentauthorassociation/
+  # Default is "collaborator, owner, member", unless "members" is set
+  #
+  #member-roles:
+  # - collaborator
+  # - owner
+  # - member
+  # Who else do we consider to be a project member? Default is empty.
+  #members:
+  # - tstromberg
 
 collections:
   - id: daily
@@ -25,11 +39,12 @@ collections:
     description: To be emptied out daily
     rules:
       - issue-needs-comment
+      - p0-fix-overdue
+      - p0-followup-overdue
       # Don't leave code reviews hanging
       - pr-reviewable
       # missing initial feedback
-      - issue-needs-type
-      - issue-needs-bundle
+      - issue-needs-kind
       # reprioritize
       - issue-new-with-reactions
       - issue-new-with-many-commenters
@@ -52,10 +67,6 @@ collections:
       - pr-approved-stale
       - pr-unapproved-stale
       - birthday
-      # Issues needing automated tests
-      - needs-tests
-      # Issues needing documentation
-      - needs-documentation
 
   - id: quarterly
     name: Quarterly Scrub
@@ -66,33 +77,42 @@ collections:
       - enhancement-old
       - other-old
 
-  - id: m2
-    name: Mautic 2 Triage
-    dedup: false
-    description: Items that need to be triaged for Mautic 2
-    rules:
-      - m2-m3-triage
-      - rebase-needed
-
-  - id: m3
-    name: Mautic 3 Triage
-    dedup: false
-    description: Issues affecting Mautic 3
-    rules:
-      - m3-triage
-      - m3-prs
-
   - id: recv
     name: "Receive queue"
     description: >
       Issues that may be waiting for our response
-  
+
       NOTE: for this to work properly, GitHub token must have read access to read organization members
     rules:
       - question-recv
       - bugs-recv
       - enhancement-recv
       - other-recv
+
+  - id: p0
+    name: P0
+    description: All hands on deck!
+    rules:
+      - p0-prs
+      - p0-features
+      - p0-bugs
+      - p0-other
+
+  - id: p1
+    name: P1
+    description: To be resolved within 6 weeks
+    rules:
+      - p1-prs
+      - p1-features
+      - p1-bugs
+      - p1-other
+
+  - id: similar
+    name: Similar
+    description: Items which appear similar to one other. Review for duplicates or vague titles.
+    rules:
+      - similar-prs
+      - similar-issues
 
   - id: open
     name: All open PR's and Issues that should be considered for repository stats (hidden)
@@ -105,7 +125,7 @@ collections:
 rules:
   ### Daily Triage ####
   issue-needs-comment:
-    name: "Unresponded by team, older than 7 days"
+    name: "Unresponded, older than 7 days"
     resolution: "Respond to the issue"
     type: issue
     filters:
@@ -120,31 +140,23 @@ rules:
     type: pull_request
     filters:
       - label: "!do-not-merge.*"
-      - label: "!.*Conflicts*"
-      - label: "!.*rebase"
-      - label: "!.*WIP"
-      - tag: "!requested-changes"
+      - label: "!needs-rebase"
+      - label: "!.*wip"
+      - label: "!cncf-cla: no"
+      - tag: "!changes-requested"
       - tag: "!send"
       - tag: "!commented"
-      
+
       # Temporarily workaround inability to track PR eligibility
       - updated: +1d
 
-  # Issues missing type
-  issue-needs-type:
-    name: "Issues missing type"
-    resolution: "Add a label denoting the type of issue"
+  # Issues missing initial feedback
+  issue-needs-kind:
+    name: "Unkinded Issues"
+    resolution: "Add a label"
     type: issue
     filters:
-      - label: "!.*(Bug|Enhancement|Translations|Feature Request|Regression|Deprecation|User Experience|User Interface).*"
-
-  # Issues missing bundle
-  issue-needs-bundle:
-    name: "Issues which are missing a label to denote the bundle they relate to"
-    resolution: "Add a label which represents the bundle this relates to"
-    type: issue
-    filters:
-      - label: "!.*(API|Campaign|Email builder|Forms|Plugin|Points & Scoring|Reports|Segments).*"
+      - label: "!.*(kind|bug|documentation|enhancement|question|todo|idea|epic).*"
 
   # Issues that may need reprioritized
   issue-new-with-reactions:
@@ -189,36 +201,6 @@ rules:
       - tag: "!contributor-last"
       - responded: +7d
 
- ####### Mautic 3 Triage #########
-  m3-triage:
-    name: "Issues affecting Mautic 3"
-    resolution: "Triage the issue"
-    type: issue
-    filters:
-      - label: ".*(Mautic 3|Persists on M3).*"
-
-  m3-prs:
-    name: "PRs for Mautic 3"
-    resolution: "Review the PR"
-    type: pull_requests
-    filters:
-      - label: ".*(Mautic 3|Persists on M3).*"
-
-####### Mautic 2 Triage #########
-  m2-m3-triage:
-    name: "Need to be triaged for relevancy to Mautic 3"
-    resolution: "Triage the issue"
-    type: issue
-    filters:
-      - label: "Triage M2/M3"
-
-  rebase-needed:
-    name: "Rebase required for Mautic 3"
-    resolution: "Rebase the PR or contact the original author"
-    type: pull_requests
-    filters:
-      - label: Need rebase for M3
-
   ####### Weekly Triage #########
   discuss:
     name: "Items for discussion"
@@ -227,19 +209,23 @@ rules:
       - label: ".*discuss"
       - state: "all"
 
-  needs-tests:
-    name: "Needs automated tests"
-    resolution: "Write automated tests"
-    type: pull_requests
+  # SLO nearing
+  p0-followup-overdue:
+    name: "p0 issue, no comments in 3 days"
+    resolution: "Downgrade to p1"
+    type: issue
     filters:
-      - label: Needs Automated Tests
+      - label: "priority/p0"
+      - tag: recv
+      - responded: +3d
 
-  needs-documentation:
-    name: "Needs documentation"
-    resolution: "Write documentation"
-    type: pull_requests
+  p0-fix-overdue:
+    name: "p0 bug, older than 7 days"
+    resolution: "Downgrade to p1"
+    type: issue
     filters:
-      - label: Needs Documentation
+      - label: "priority/p0"
+      - created: +7d
 
   # issues needing reprioritization
   many-reactions:
@@ -302,7 +288,7 @@ rules:
       - created: +20d
       - updated: +5d
       - responded: +2d
-  
+
   ## Bug Scrub ##
   question-old:
     name: "Questions that have been open for >3 weeks"
@@ -379,7 +365,88 @@ rules:
       - label: "!.*bug"
       - label: ".*question"
 
-  # for stastistics generation
+  # P0
+  p0-features:
+    name: "p0 Bugs"
+    type: issue
+    resolution: Close or deprioritize
+    filters:
+      - label: "priority/p0"
+      - label: "kind/bug"
+
+  p0-bugs:
+    name: "p0 Features"
+    type: issue
+    resolution: Close or deprioritize
+    filters:
+      - label: "priority/p0"
+      - label: "kind/feature-request"
+
+  p0-other:
+    name: "p0 Other"
+    type: issue
+    resolution: Close or deprioritize
+    filters:
+      - label: "priority/p0"
+      - label: "!kind/feature-request"
+      - label: "!kind/bug"
+
+  p0-prs:
+    name: "p0 Pull Requests"
+    type: pull_request
+    resolution: Merge em
+    filters:
+      - label: "priority/p0"
+
+  # P1
+  p1-bugs:
+    name: "p1 Bugs"
+    type: issue
+    resolution: Close or deprioritize
+    filters:
+      - label: "priority/p1"
+      - label: "kind/bug"
+
+  p1-features:
+    name: "p1 Features"
+    type: issue
+    resolution: Close or deprioritize
+    filters:
+      - label: "priority/p1"
+      - label: "kind/feature-request"
+
+  p1-other:
+    name: "p1 Other"
+    type: issue
+    resolution: Close or deprioritize
+    filters:
+      - label: "priority/p1"
+      - label: "!kind/feature-request"
+      - label: "!kind/bug"
+
+  p1-prs:
+    name: "p1 Pull Requests"
+    type: pull_request
+    resolution: Merge em
+    filters:
+      - label: "priority/p1"
+
+  ## Similar
+  similar-prs:
+    name: "Similar Pull Requests"
+    type: pull_request
+    resolution: Close as duplicate or give a better title
+    filters:
+      - tag: similar
+
+  similar-issues:
+    name: "Similar Issues"
+    type: issue
+    resolution: Close as duplicate or give a better title
+    filters:
+      - tag: similar
+
+  # for statistics generation
   open-issues:
     name: "Open Issues"
     type: issue

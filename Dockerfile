@@ -1,4 +1,3 @@
-# syntax = docker/dockerfile:1.0-experimental
 # Copyright 2020 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,33 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang
+############################################################################
+# About this Dockerfile
+#
+# This Dockerfile is optimized for local development or deployments which
+# require the configuration file to be baked into the resulting image.
+#
+# If you would rather pass configuration in via other means, such as a
+# ConfigMap or environment variable, use the "triageparty/triage-party"
+# image published on Docker Hub, or build the equivalent
+# using "base.Dockerfile"
+
+# Stage 1: Build Triage Party (identical to base.Dockerfile)
+FROM golang AS builder
 WORKDIR /app
-
-# CFG is the path to your configuration file
-ARG CFG
-
-# Set an env var that matches your github repo name, replace treeder/dockergo here with your repo name
 ENV SRC_DIR=/src/tparty
 ENV GO111MODULE=on
-
 RUN mkdir -p ${SRC_DIR}/cmd ${SRC_DIR}/third_party ${SRC_DIR}/pkg ${SRC_DIR}/site /app/third_party /app/site
 COPY go.* $SRC_DIR/
 COPY cmd ${SRC_DIR}/cmd/
 COPY pkg ${SRC_DIR}/pkg/
+WORKDIR $SRC_DIR
+RUN go mod download
+RUN go build cmd/server/main.go
 
-# Build the binary
-RUN cd $SRC_DIR && go mod download
-RUN cd $SRC_DIR/cmd/server && go build -o main
-RUN cp $SRC_DIR/cmd/server/main /app/
+# Stage 2: Copy local persistent cache into temp container containing "mv"
+FROM alpine AS temp
+ARG CFG=config/config.yaml
+COPY pcache /pc
+RUN echo "Pre-populating cache if found (failure is perfectly OK)"
+RUN mv /pc/$(basename $CFG).pc /config.yaml.pc || touch /config.yaml.pc
 
-# Setup our deployment
+# Stage 3: Build the configured application container
+FROM gcr.io/distroless/base AS triage-party
+ARG CFG=config/config.yaml
+COPY --from=builder /src/tparty/main /app/
+COPY --from=temp /config.yaml.pc /app/pcache/config.yaml.pc
 COPY site /app/site/
 COPY third_party /app/third_party/
-COPY $CFG /app/config.yaml
+COPY $CFG /app/config/config.yaml
 
-# Bad hack: pre-heat the cache in lieu of persistent storage
-RUN --mount=type=secret,id=github /app/main --github-token-file=/run/secrets/github --config /app/config.yaml --site_dir /app/site --dry_run
-
-# Run the server at a reasonable refresh rate
-CMD ["/app/main", "--item_expiry=5m", "--max_refresh_age=15m", "--config=/app/config.yaml", "--site_dir=/app/site", "--3p_dir=/app/third_party"]
+# Useful environment variables:
+# 
+# * GITHUB_TOKEN: Sets GitHub API token
+# * CONFIG_PATH: Sets configuration path (defaults to "/app/config/config.yaml")
+# * PORT: Sets HTTP listening port (defaults to 8080)
+# * PERSIST_BACKEND: Set the cache persistence backend
+# * PERSIST_PATH: Set the cache persistence path
+# 
+# For other environment variables, see:
+# https://github.com/google/triage-party/blob/master/docs/deploy.md
+CMD ["/app/main", "--min-refresh=30s", "--max-refresh=8m", "--site=/app/site", "--3p=/app/third_party"]

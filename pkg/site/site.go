@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package handlers define HTTP handlers.
+// Package site define HTTP handlers.
 package site
 
 import (
@@ -20,7 +20,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,13 +33,16 @@ import (
 	"github.com/google/go-github/v31/github"
 	"gopkg.in/yaml.v2"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
-const VERSION = "v1.0.0-beta.0"
+// VERSION is what version of Triage Party we advertise as.
+const VERSION = "v1.2.0-beta.1"
 
 var (
-	nonWordRe  = regexp.MustCompile(`\W`)
+	nonWordRe = regexp.MustCompile(`\W`)
+
+	// MaxPlayers is how many players to enable in the web interface.
 	MaxPlayers = 20
 )
 
@@ -55,21 +57,23 @@ type Config struct {
 
 func New(c *Config) *Handlers {
 	return &Handlers{
-		baseDir:  c.BaseDirectory,
-		updater:  c.Updater,
-		party:    c.Party,
-		siteName: c.Name,
-		warnAge:  c.WarnAge,
+		baseDir:   c.BaseDirectory,
+		updater:   c.Updater,
+		party:     c.Party,
+		siteName:  c.Name,
+		warnAge:   c.WarnAge,
+		startTime: time.Now(),
 	}
 }
 
 // Handlers is a mix of config and client interfaces to connect with.
 type Handlers struct {
-	baseDir  string
-	updater  *updater.Updater
-	party    *triage.Party
-	siteName string
-	warnAge  time.Duration
+	baseDir   string
+	updater   *updater.Updater
+	party     *triage.Party
+	siteName  string
+	warnAge   time.Duration
+	startTime time.Time
 }
 
 // Root redirects to leaderboard.
@@ -96,6 +100,7 @@ type Page struct {
 	TotalShown  int
 	Types       string
 	UniqueItems []*hubbub.Conversation
+	ResultAge   time.Duration
 
 	Player        int
 	Players       int
@@ -109,14 +114,30 @@ type Page struct {
 	TotalPullRequests      int
 	TotalIssues            int
 
+	ClosedPerDay float64
+
 	Collection  triage.Collection
 	Collections []triage.Collection
 
-	CollectionResult *triage.CollectionResult
-	Stats            *triage.CollectionResult
-	StatsID          string
+	Swimlanes            []*Swimlane
+	CollectionResult     *triage.CollectionResult
+	SelectorVar          string
+	SelectorOptions      []Choice
+	Milestone            *github.Milestone
+	MilestoneETA         time.Time
+	MilestoneCountOffset int
+	MilestoneVeryLate    bool
 
-	GetVars string
+	OpenStats     *triage.CollectionResult
+	VelocityStats *triage.CollectionResult
+	GetVars       string
+}
+
+// Choice is a selector choice
+type Choice struct {
+	Value    int
+	Text     string
+	Selected bool
 }
 
 // is this request an HTTP refresh?
@@ -127,171 +148,6 @@ func isRefresh(r *http.Request) bool {
 	}
 	//	klog.Infof("cc=%s headers=%+v", cc, r.Header)
 	return cc[0] == "max-age-0" || cc[0] == "no-cache"
-}
-
-// Board shows a stratgy board
-func (h *Handlers) Collection() http.HandlerFunc {
-	fmap := template.FuncMap{
-		"toJS":          toJS,
-		"toYAML":        toYAML,
-		"toJSfunc":      toJSfunc,
-		"toDays":        toDays,
-		"HumanDuration": humanDuration,
-		"HumanTime":     humanTime,
-		"UnixNano":      unixNano,
-		"Avatar":        avatar,
-	}
-	t := template.Must(template.New("collection").Funcs(fmap).ParseFiles(
-		filepath.Join(h.baseDir, "collection.tmpl"),
-		filepath.Join(h.baseDir, "base.tmpl"),
-	))
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		defer func() {
-			klog.Infof("Collection request complete in %s", time.Since(start))
-		}()
-		id := strings.TrimPrefix(r.URL.Path, "/s/")
-		playerChoices := []string{"Select a player"}
-		players := getInt(r.URL, "players", 1)
-		player := getInt(r.URL, "player", 0)
-		mode := getInt(r.URL, "mode", 0)
-		index := getInt(r.URL, "index", 1)
-
-		for i := 0; i < players; i++ {
-			playerChoices = append(playerChoices, fmt.Sprintf("Player %d", i+1))
-		}
-
-		playerNums := []int{}
-		for i := 0; i < MaxPlayers; i++ {
-			playerNums = append(playerNums, i+1)
-		}
-
-		klog.Infof("GET %s (%q): %v", r.URL.Path, id, r.Header)
-		s, err := h.party.LookupCollection(id)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("%q not found: old link or typo?", id), http.StatusNotFound)
-			klog.Errorf("collection: %v", err)
-			return
-		}
-
-		sts, err := h.party.ListCollections()
-		if err != nil {
-			klog.Errorf("collections: %v", err)
-			http.Error(w, "list error", http.StatusInternalServerError)
-			return
-		}
-
-		var result *triage.CollectionResult
-		if isRefresh(r) {
-			result = h.updater.ForceRefresh(r.Context(), id)
-			klog.Infof("refresh %q result: %d items", id, len(result.RuleResults))
-		} else {
-			result = h.updater.Lookup(r.Context(), id, true)
-			if result == nil {
-				http.Error(w, fmt.Sprintf("%q no data", id), http.StatusNotFound)
-				return
-			}
-			if result.RuleResults == nil {
-				http.Error(w, fmt.Sprintf("%q no outcomes", id), http.StatusNotFound)
-				return
-			}
-
-			klog.Infof("lookup %q result: %d items", id, len(result.RuleResults))
-		}
-
-		warning := ""
-		if time.Since(result.Time) > h.warnAge {
-			warning = fmt.Sprintf("Serving stale results (%s old) - refreshing results in background. Use Shift-Reload to force data to refresh at any time.", time.Since(result.Time))
-		}
-
-		total := 0
-		for _, o := range result.RuleResults {
-			total += len(o.Items)
-		}
-
-		unique := []*hubbub.Conversation{}
-		seen := map[int]bool{}
-		for _, o := range result.RuleResults {
-			for _, i := range o.Items {
-				if !seen[i.ID] {
-					unique = append(unique, i)
-					seen[i.ID] = true
-				}
-			}
-		}
-
-		if player > 0 && players > 1 {
-			result = playerFilter(result, player, players)
-		}
-
-		uniqueFiltered := []*hubbub.Conversation{}
-		seenFiltered := map[int]bool{}
-		for _, o := range result.RuleResults {
-			for _, i := range o.Items {
-				if !seenFiltered[i.ID] {
-					uniqueFiltered = append(uniqueFiltered, i)
-					seenFiltered[i.ID] = true
-				}
-			}
-		}
-
-		embedURL := ""
-		if mode == 1 {
-			searchIndex := 0
-			for _, o := range result.RuleResults {
-				for _, i := range o.Items {
-					searchIndex++
-					if searchIndex == index {
-						embedURL = i.URL
-					}
-				}
-			}
-		}
-
-		getVars := ""
-		if players > 0 {
-			getVars = fmt.Sprintf("?player=%d&players=%d", player, players)
-		}
-
-		p := &Page{
-			ID:               s.ID,
-			Version:          VERSION,
-			SiteName:         h.siteName,
-			Title:            s.Name,
-			Collection:       s,
-			Collections:      sts,
-			Description:      s.Description,
-			CollectionResult: result,
-			Total:            len(unique),
-			TotalShown:       len(uniqueFiltered),
-			Types:            "Issues",
-			PlayerChoices:    playerChoices,
-			PlayerNums:       playerNums,
-			Player:           player,
-			Players:          players,
-			Mode:             mode,
-			Index:            index,
-			EmbedURL:         embedURL,
-			Warning:          warning,
-			UniqueItems:      uniqueFiltered,
-			GetVars:          getVars,
-		}
-
-		for _, s := range sts {
-			if s.UsedForStats {
-				p.Stats = h.updater.Lookup(r.Context(), s.ID, false)
-				p.StatsID = s.ID
-			}
-		}
-
-		klog.V(2).Infof("page context: %+v", p)
-		err = t.ExecuteTemplate(w, "base", p)
-		if err != nil {
-			klog.Errorf("tmpl: %v", err)
-			return
-		}
-	}
 }
 
 // helper to get integers from a URL
@@ -326,19 +182,26 @@ func toJSfunc(s string) template.JS {
 	return template.JS(nonWordRe.ReplaceAllString(s, "_"))
 }
 
+// Make a class name
+func className(s string) template.HTMLAttr {
+	s = strings.ToLower(nonWordRe.ReplaceAllString(s, "-"))
+	s = strings.Replace(s, "_", "-", -1)
+	return template.HTMLAttr(s)
+}
+
 func unixNano(t time.Time) int64 {
 	return t.UnixNano()
 }
 
 func humanDuration(d time.Duration) string {
-	return humanTime(time.Now().Add(-d))
+	return roughTime(time.Now().Add(-d))
 }
 
 func toDays(d time.Duration) string {
 	return fmt.Sprintf("%0.1fd", d.Hours()/24)
 }
 
-func humanTime(t time.Time) string {
+func roughTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
@@ -373,8 +236,8 @@ func avatar(u *github.User) template.HTML {
 // playerFilter filters out results for a particular player
 func playerFilter(result *triage.CollectionResult, player int, players int) *triage.CollectionResult {
 	klog.Infof("Filtering for player %d of %d ...", player, players)
-	os := []*triage.RuleResult{}
 
+	os := []*triage.RuleResult{}
 	seen := map[string]*triage.Rule{}
 
 	for _, o := range result.RuleResults {
@@ -382,13 +245,13 @@ func playerFilter(result *triage.CollectionResult, player int, players int) *tri
 
 		for _, i := range o.Items {
 			if (i.ID % players) == (player - 1) {
-				klog.Infof("%d belongs to player %d", i.ID, player)
+				klog.V(3).Infof("%d belongs to player %d", i.ID, player)
 				cs = append(cs, i)
 			}
 		}
 
 		os = append(os, triage.SummarizeRuleResult(o.Rule, cs, seen))
-
 	}
-	return triage.SummarizeCollectionResult(os)
+
+	return triage.SummarizeCollectionResult(result.Collection, os)
 }

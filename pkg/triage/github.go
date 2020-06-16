@@ -3,11 +3,14 @@ package triage
 import (
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
 
-	"k8s.io/klog"
+	"github.com/google/go-github/v31/github"
+
+	"k8s.io/klog/v2"
 )
 
 // parseRepo returns the organization and project for a URL
@@ -36,12 +39,26 @@ func MustReadToken(path string, env string) string {
 		if err != nil {
 			klog.Exitf("unable to read token file: %v", err)
 		}
-		token = strings.TrimSpace(string(t))
+		token = string(t)
 		klog.Infof("loaded %d byte github token from %s", len(token), path)
+	} else {
+		klog.Infof("loaded %d byte github token from %s", len(token), env)
 	}
 
+	token = strings.TrimSpace(string(token))
 	if len(token) < 8 {
 		klog.Exitf("github token impossibly small: %q", token)
 	}
 	return token
+}
+
+func MustCreateGithubClient(githubAPIRawURL string, httpClient *http.Client) *github.Client {
+	if githubAPIRawURL != "" {
+		client, err := github.NewEnterpriseClient(githubAPIRawURL, githubAPIRawURL, httpClient)
+		if err != nil {
+			klog.Exitf("unable to create GitHub client: %v", err)
+		}
+		return client
+	}
+	return github.NewClient(httpClient)
 }

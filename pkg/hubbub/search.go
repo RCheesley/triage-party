@@ -10,68 +10,73 @@ import (
 	"github.com/hokaccha/go-prettyjson"
 
 	"github.com/google/go-github/v31/github"
-	"k8s.io/klog"
+	"github.com/google/triage-party/pkg/logu"
+	"k8s.io/klog/v2"
 )
 
 // Search for GitHub issues or PR's
-func (h *Engine) SearchAny(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, error) {
-	cs, err := h.SearchIssues(ctx, org, project, fs, newerThan)
+func (h *Engine) SearchAny(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, time.Time, error) {
+	cs, ts, err := h.SearchIssues(ctx, org, project, fs, newerThan)
 	if err != nil {
-		return cs, err
+		return cs, ts, err
 	}
 
-	pcs, err := h.SearchPullRequests(ctx, org, project, fs, newerThan)
+	pcs, pts, err := h.SearchPullRequests(ctx, org, project, fs, newerThan)
 	if err != nil {
-		return cs, err
+		return cs, ts, err
 	}
 
-	return append(cs, pcs...), nil
+	if pts.After(ts) {
+		ts = pts
+	}
+
+	return append(cs, pcs...), ts, nil
 }
 
 // Search for GitHub issues or PR's
-func (h *Engine) SearchIssues(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, error) {
+func (h *Engine) SearchIssues(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, time.Time, error) {
 	fs = openByDefault(fs)
-	klog.Infof("Gathering raw data for %s/%s search %s - newer than %s", org, project, toYAML(fs), newerThan)
+	klog.V(1).Infof("Gathering raw data for %s/%s search %s - newer than %s", org, project, toYAML(fs), logu.STime(newerThan))
 	var wg sync.WaitGroup
 
-	var members map[string]bool
 	var open []*github.Issue
 	var closed []*github.Issue
 	var err error
 
-	orgCutoff := time.Now().Add(h.orgMemberExpiry * -1)
-	if h.acceptStaleResults {
-		orgCutoff = time.Time{}
-	}
+	age := time.Now()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		members, err = h.cachedOrgMembers(ctx, org, orgCutoff)
-		if err != nil {
-			klog.Errorf("members: %v", err)
-			return
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		open, err = h.cachedIssues(ctx, org, project, "open", 0, newerThan)
+		oi, ots, err := h.cachedIssues(ctx, org, project, "open", 0, newerThan)
 		if err != nil {
 			klog.Errorf("open issues: %v", err)
 			return
 		}
+		if ots.Before(age) {
+			age = ots
+		}
+		open = oi
 		klog.V(1).Infof("%s/%s open issue count: %d", org, project, len(open))
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		closed, err = h.cachedIssues(ctx, org, project, "closed", closedIssueDays, newerThan)
+		if !NeedsClosed(fs) {
+			return
+		}
+
+		ci, cts, err := h.cachedIssues(ctx, org, project, "closed", h.MaxClosedUpdateAge, newerThan)
 		if err != nil {
 			klog.Errorf("closed issues: %v", err)
 		}
+
+		if cts.Before(age) {
+			age = cts
+		}
+		closed = ci
+
 		klog.V(1).Infof("%s/%s closed issue count: %d", org, project, len(closed))
 	}()
 
@@ -84,7 +89,6 @@ func (h *Engine) SearchIssues(ctx context.Context, org string, project string, f
 		if h.debugNumber != 0 {
 			if i.GetNumber() == h.debugNumber {
 				klog.Errorf("*** Found debug issue #%d:\n%s", i.GetNumber(), formatStruct(*i))
-
 			} else {
 				continue
 			}
@@ -113,41 +117,96 @@ func (h *Engine) SearchIssues(ctx context.Context, org string, project string, f
 			klog.V(1).Infof("#%d - %q did not match item filter: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
 			continue
 		}
+		klog.V(1).Infof("#%d - %q made it past pre-fetch: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
 
 		comments := []*github.IssueComment{}
-		if i.GetComments() > 0 {
+		if i.GetState() == "open" && i.GetComments() > 0 {
 			klog.V(1).Infof("#%d - %q: need comments for final filtering", i.GetNumber(), i.GetTitle())
-			comments, err = h.cachedIssueComments(ctx, org, project, i.GetNumber(), i.GetUpdatedAt())
+			comments, _, err = h.cachedIssueComments(ctx, org, project, i.GetNumber(), i.GetUpdatedAt())
 			if err != nil {
 				klog.Errorf("comments: %v", err)
 			}
 		}
 
-		co := h.IssueSummary(i, comments, members[i.User.GetLogin()])
+		co := h.IssueSummary(i, comments)
 		co.Labels = labels
 		h.seen[co.URL] = co
 
+		co.Similar = h.FindSimilar(co)
+		if len(co.Similar) > 0 {
+			co.Tags = append(co.Tags, Tag{ID: "similar", Description: "Title appears similar to another PR or issue"})
+		}
+
 		if !postFetchMatch(co, fs) {
-			klog.V(1).Infof("#%d - %q did not match conversation filter: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
+			klog.V(1).Infof("#%d - %q did not match post-fetch filter: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
 			continue
 		}
+		klog.V(1).Infof("#%d - %q made it past post-fetch: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
+
+		updatedAt := h.timelineDate(i)
+		var timeline []*github.Timeline
+		if i.GetState() == "open" && updatedAt.After(i.GetCreatedAt()) {
+			timeline, err = h.cachedTimeline(ctx, org, project, i.GetNumber(), updatedAt)
+			if err != nil {
+				klog.Errorf("timeline: %v", err)
+				continue
+			}
+		}
+
+		h.addEvents(ctx, co, timeline)
+
+		if !postEventsMatch(co, fs) {
+			klog.V(1).Infof("#%d - %q did not match post-events filter: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
+			continue
+		}
+		klog.V(1).Infof("#%d - %q made it past post-events: %s", i.GetNumber(), i.GetTitle(), toYAML(fs))
 
 		filtered = append(filtered, co)
 	}
 
-	// TODO: Make this only happen when caches are missed
-	if err := h.updateSimilarConversations(filtered); err != nil {
-		klog.Errorf("update similar: %v", err)
-	}
-
-	klog.Infof("%d of %d issues within %s/%s matched filters %s", len(filtered), len(is), org, project, toYAML(fs))
-	return filtered, nil
+	klog.V(1).Infof("%d of %d issues within %s/%s matched filters %s", len(filtered), len(is), org, project, toYAML(fs))
+	return filtered, age, nil
 }
 
-func (h *Engine) SearchPullRequests(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, error) {
+// timelineDate is a workaround the GitHub misfeature that UpdatedAt is not incremented for cross-reference events
+func (h *Engine) timelineDate(i GitHubItem) time.Time {
+	updatedAt := i.GetUpdatedAt()
+	latestXref := h.latestXref[i.GetHTMLURL()]
+
+	if latestXref.After(updatedAt) {
+		klog.Infof("%s was cross-referenced at %s, after last update %s", i.GetHTMLURL(), latestXref, updatedAt)
+		updatedAt = latestXref
+	} else if !latestXref.IsZero() {
+		klog.V(3).Infof("%s was cross-referenced at %s, before last update %s", i.GetHTMLURL(), latestXref, updatedAt)
+	}
+
+	return updatedAt
+}
+
+// NeedsClosed returns whether or not the filters require closed items
+func NeedsClosed(fs []Filter) bool {
+	// First-pass filter: do any filters require closed data?
+	for _, f := range fs {
+		if f.ClosedCommenters != "" {
+			klog.Infof("will need closed items due to ClosedCommenters=%s", f.ClosedCommenters)
+			return true
+		}
+		if f.ClosedComments != "" {
+			klog.Infof("will need closed items due to ClosedComments=%s", f.ClosedComments)
+			return true
+		}
+		if f.State != "" && f.State != "open" {
+			klog.Infof("will need closed items due to State=%s", f.State)
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Engine) SearchPullRequests(ctx context.Context, org string, project string, fs []Filter, newerThan time.Time) ([]*Conversation, time.Time, error) {
 	fs = openByDefault(fs)
 
-	klog.Infof("Searching %s/%s for PR's matching: %s - newer than %s", org, project, toYAML(fs), newerThan)
+	klog.V(1).Infof("Searching %s/%s for PR's matching: %s - newer than %s", org, project, toYAML(fs), logu.STime(newerThan))
 	filtered := []*Conversation{}
 
 	var wg sync.WaitGroup
@@ -155,33 +214,52 @@ func (h *Engine) SearchPullRequests(ctx context.Context, org string, project str
 	var open []*github.PullRequest
 	var closed []*github.PullRequest
 	var err error
+	age := time.Now()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		open, err = h.cachedPRs(ctx, org, project, "open", 0, newerThan)
+		op, ots, err := h.cachedPRs(ctx, org, project, "open", 0, newerThan)
 		if err != nil {
 			klog.Errorf("open prs: %v", err)
 			return
 		}
+		if ots.Before(age) {
+			age = ots
+		}
+		open = op
 		klog.V(1).Infof("open PR count: %d", len(open))
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		closed, err = h.cachedPRs(ctx, org, project, "closed", closedPRDays, newerThan)
+		if !NeedsClosed(fs) {
+			return
+		}
+		cp, cts, err := h.cachedPRs(ctx, org, project, "closed", h.MaxClosedUpdateAge, newerThan)
 		if err != nil {
 			klog.Errorf("closed prs: %v", err)
 			return
 		}
+
+		if cts.Before(age) {
+			age = cts
+		}
+		closed = cp
+
 		klog.V(1).Infof("closed PR count: %d", len(closed))
 	}()
 
 	wg.Wait()
 
+	var latest time.Time
 	prs := []*github.PullRequest{}
 	for _, pr := range append(open, closed...) {
+		if pr.GetUpdatedAt().After(latest) {
+			latest = pr.GetUpdatedAt()
+		}
+
 		if h.debugNumber != 0 {
 			if pr.GetNumber() == h.debugNumber {
 				klog.Errorf("*** Found debug PR #%d:\n%s", pr.GetNumber(), formatStruct(*pr))
@@ -199,39 +277,59 @@ func (h *Engine) SearchPullRequests(ctx context.Context, org string, project str
 			continue
 		}
 
-		comments := []*github.PullRequestComment{}
+		var timeline []*github.Timeline
+		var reviews []*github.PullRequestReview
+		var comments []*Comment
 		// pr.GetComments() always returns 0 :(
 		if pr.GetState() == "open" && pr.GetUpdatedAt().After(pr.GetCreatedAt()) {
-			comments, err = h.cachedPRComments(ctx, org, project, pr.GetNumber(), pr.GetUpdatedAt())
+			comments, _, err = h.prComments(ctx, org, project, pr.GetNumber(), pr.GetUpdatedAt())
 			if err != nil {
 				klog.Errorf("comments: %v", err)
 			}
-			if pr.GetNumber() == h.debugNumber {
-				klog.Errorf("debug comments: %s", formatStruct(comments))
+
+			timeline, err = h.cachedTimeline(ctx, org, project, pr.GetNumber(), pr.GetUpdatedAt())
+			if err != nil {
+				klog.Errorf("timeline: %v", err)
+				continue
 			}
+
+			reviews, _, err = h.cachedReviews(ctx, org, project, pr.GetNumber(), pr.GetUpdatedAt())
+			if err != nil {
+				klog.Errorf("reviews: %v", err)
+				continue
+			}
+
 		} else {
-			klog.Infof("skipping comment download for #%d - not updated", pr.GetNumber())
+			klog.Infof("skipping extended download for #%d - not updated", pr.GetNumber())
 		}
 
-		co := h.PRSummary(pr, comments)
-		co.Labels = pr.Labels
-		h.seen[co.URL] = co
+		if pr.GetNumber() == h.debugNumber {
+			klog.Errorf("*** Debug PR timeline #%d:\n%s", pr.GetNumber(), formatStruct(timeline))
+		}
 
+		co := h.PRSummary(ctx, pr, comments, timeline, reviews)
+		co.Labels = pr.Labels
+		co.Similar = h.FindSimilar(co)
+		if len(co.Similar) > 0 {
+			co.Tags = append(co.Tags, Tag{ID: "similar", Description: "Title appears similar to another PR or issue"})
+		}
+
+		h.seen[co.URL] = co
 		if !postFetchMatch(co, fs) {
 			klog.V(4).Infof("PR #%d did not pass postFetchMatch with filter: %v", pr.GetNumber(), fs)
+			continue
+		}
+
+		if !postEventsMatch(co, fs) {
+			klog.V(1).Infof("#%d - %q did not match post-events filter: %s", pr.GetNumber(), pr.GetTitle(), toYAML(fs))
 			continue
 		}
 
 		filtered = append(filtered, co)
 	}
 
-	// TODO: Make this only happen when caches are missed
-	if err := h.updateSimilarConversations(filtered); err != nil {
-		klog.Errorf("update similar: %v", err)
-	}
-
-	klog.Infof("%d of %d PR's within %s/%s matched filters:\n%s", len(filtered), len(prs), org, project, toYAML(fs))
-	return filtered, nil
+	klog.V(1).Infof("%d of %d PR's within %s/%s matched filters:\n%s", len(filtered), len(prs), org, project, toYAML(fs))
+	return filtered, latest, nil
 }
 
 func formatStruct(x interface{}) string {

@@ -17,61 +17,78 @@ package hubbub
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/go-github/v31/github"
-	"github.com/google/triage-party/pkg/initcache"
+	"github.com/google/triage-party/pkg/logu"
+	"github.com/google/triage-party/pkg/persist"
 	"gopkg.in/yaml.v2"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
-// closedIssueDays is how old of a closed issue to consider
-const closedIssueDays = 14
-
 // cachedIssues returns issues, cached if possible
-func (h *Engine) cachedIssues(ctx context.Context, org string, project string, state string, updatedDays int, newerThan time.Time) ([]*github.Issue, error) {
-	key := issueSearchKey(org, project, state, updatedDays)
+func (h *Engine) cachedIssues(ctx context.Context, org string, project string, state string, updateAge time.Duration, newerThan time.Time) ([]*github.Issue, time.Time, error) {
+	key := issueSearchKey(org, project, state, updateAge)
 
 	if x := h.cache.GetNewerThan(key, newerThan); x != nil {
-		return x.Issues, nil
+		// Normally the similarity tables are only updated when fresh data is encountered.
+		if newerThan.IsZero() {
+			klog.V(1).Infof("Updating similarity table from cache %q (%d items)", key, len(x.Issues))
+			for _, i := range x.Issues {
+				h.updateSimilarityTables(i.GetTitle(), i.GetHTMLURL())
+			}
+		}
+
+		return x.Issues, x.Created, nil
 	}
 
-	klog.Infof("cache miss for %s newer than %s", key, newerThan)
-	return h.updateIssues(ctx, org, project, state, updatedDays, key)
+	klog.V(1).Infof("cache miss for %s newer than %s", key, logu.STime(newerThan))
+	return h.updateIssues(ctx, org, project, state, updateAge, key)
 }
 
 // updateIssues updates the issues in cache
-func (h *Engine) updateIssues(ctx context.Context, org string, project string, state string, updatedDays int, key string) ([]*github.Issue, error) {
+func (h *Engine) updateIssues(ctx context.Context, org string, project string, state string, updateAge time.Duration, key string) ([]*github.Issue, time.Time, error) {
+	start := time.Now()
+
 	opt := &github.IssueListByRepoOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 		State:       state,
 	}
-	klog.Infof("%s issue list opts for %s: %+v", state, key, opt)
 
-	if updatedDays > 0 {
-		opt.Since = time.Now().Add(time.Duration(updatedDays*-24) * time.Hour)
+	klog.V(2).Infof("%s issue list opts for %s: %+v", state, key, opt)
+
+	if updateAge != 0 {
+		opt.Since = time.Now().Add(-1 * updateAge)
 	}
 
 	var allIssues []*github.Issue
 
 	for {
-		klog.Infof("Downloading %s issues for %s/%s (page %d)...", state, org, project, opt.Page)
-		is, resp, err := h.client.Issues.ListByRepo(ctx, org, project, opt)
-		if err != nil {
-			return is, err
+		if updateAge == 0 {
+			klog.Infof("Downloading %s issues for %s/%s (page %d)...", state, org, project, opt.Page)
+		} else {
+			klog.Infof("Downloading %s issues for %s/%s updated within %s (page %d)...", state, org, project, updateAge, opt.Page)
 		}
+
+		is, resp, err := h.client.Issues.ListByRepo(ctx, org, project, opt)
+
+		if _, ok := err.(*github.RateLimitError); ok {
+			klog.Errorf("oh snap! I reached the GitHub search API limit: %v", err)
+		}
+
+		if err != nil {
+			return is, start, err
+		}
+		h.logRate(resp.Rate)
 
 		for _, i := range is {
 			if i.IsPullRequest() {
 				continue
 			}
 
-			if i.GetState() != state {
-				klog.Errorf("#%d: I asked for state %q, but got issue in %q - open a go-github bug!", i.GetNumber(), state, i.GetState())
-				continue
-			}
-
+			h.updateSimilarityTables(i.GetTitle(), i.GetHTMLURL())
 			allIssues = append(allIssues, i)
 		}
 
@@ -81,27 +98,28 @@ func (h *Engine) updateIssues(ctx context.Context, org string, project string, s
 		opt.Page = resp.NextPage
 	}
 
-	if err := h.cache.Set(key, &initcache.Hoard{Issues: allIssues}); err != nil {
+	if err := h.cache.Set(key, &persist.Thing{Issues: allIssues}); err != nil {
 		klog.Errorf("set %q failed: %v", key, err)
 	}
 
-	klog.Infof("updateIssues %s returning %d issues", key, len(allIssues))
-	return allIssues, nil
+	klog.V(1).Infof("updateIssues %s returning %d issues", key, len(allIssues))
+	return allIssues, start, nil
 }
 
-func (h *Engine) cachedIssueComments(ctx context.Context, org string, project string, num int, newerThan time.Time) ([]*github.IssueComment, error) {
+func (h *Engine) cachedIssueComments(ctx context.Context, org string, project string, num int, newerThan time.Time) ([]*github.IssueComment, time.Time, error) {
 	key := fmt.Sprintf("%s-%s-%d-issue-comments", org, project, num)
 
 	if x := h.cache.GetNewerThan(key, newerThan); x != nil {
-		return x.IssueComments, nil
+		return x.IssueComments, x.Created, nil
 	}
 
-	klog.Infof("cache miss for %s newer than %s", key, newerThan)
+	klog.V(1).Infof("cache miss for %s newer than %s", key, logu.STime(newerThan))
 	return h.updateIssueComments(ctx, org, project, num, key)
 }
 
-func (h *Engine) updateIssueComments(ctx context.Context, org string, project string, num int, key string) ([]*github.IssueComment, error) {
-	klog.Infof("Downloading issue comments for %s/%s #%d", org, project, num)
+func (h *Engine) updateIssueComments(ctx context.Context, org string, project string, num int, key string) ([]*github.IssueComment, time.Time, error) {
+	klog.V(1).Infof("Downloading issue comments for %s/%s #%d", org, project, num)
+	start := time.Now()
 
 	opt := &github.IssueListCommentsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
@@ -109,14 +127,16 @@ func (h *Engine) updateIssueComments(ctx context.Context, org string, project st
 
 	var allComments []*github.IssueComment
 	for {
-		klog.V(2).Infof("Downloading comments for %s/%s #%d (page %d)...", org, project, num, opt.Page)
+		klog.Infof("Downloading comments for %s/%s #%d (page %d)...", org, project, num, opt.Page)
 		cs, resp, err := h.client.Issues.ListComments(ctx, org, project, num, opt)
 		klog.V(2).Infof("Received %d comments", len(cs))
 		klog.V(2).Infof("response: %+v", resp)
 
 		if err != nil {
-			return cs, err
+			return cs, start, err
 		}
+		h.logRate(resp.Rate)
+
 		allComments = append(allComments, cs...)
 		if resp.NextPage == 0 {
 			break
@@ -124,11 +144,11 @@ func (h *Engine) updateIssueComments(ctx context.Context, org string, project st
 		opt.Page = resp.NextPage
 	}
 
-	if err := h.cache.Set(key, &initcache.Hoard{IssueComments: allComments}); err != nil {
+	if err := h.cache.Set(key, &persist.Thing{IssueComments: allComments}); err != nil {
 		klog.Errorf("set %q failed: %v", key, err)
 	}
 
-	return allComments, nil
+	return allComments, start, nil
 }
 
 func toYAML(v interface{}) string {
@@ -152,35 +172,29 @@ func openByDefault(fs []Filter) []Filter {
 	return fs
 }
 
-type CommentLike interface {
-	GetAuthorAssociation() string
-	GetBody() string
-	GetCreatedAt() time.Time
-	GetReactions() *github.Reactions
-	GetHTMLURL() string
-	GetID() int64
-	GetURL() string
-	GetUpdatedAt() time.Time
-	GetUser() *github.User
-	String() string
-}
-
-func (h *Engine) IssueSummary(i *github.Issue, cs []*github.IssueComment, authorIsMember bool) *Conversation {
-	cl := []CommentLike{}
+func (h *Engine) IssueSummary(i *github.Issue, cs []*github.IssueComment) *Conversation {
+	cl := []*Comment{}
 	for _, c := range cs {
-		cl = append(cl, CommentLike(c))
+		cl = append(cl, NewComment(c))
 	}
-	co := h.conversation(i, cl, authorIsMember)
+
+	co := h.conversation(i, cl)
 	r := i.GetReactions()
 	co.ReactionsTotal += r.GetTotalCount()
 	for k, v := range reactions(r) {
 		co.Reactions[k] += v
 	}
 	co.ClosedBy = i.GetClosedBy()
+
+	sort.Slice(co.Tags, func(i, j int) bool { return co.Tags[i].ID < co.Tags[j].ID })
 	return co
 }
 
 func isBot(u *github.User) bool {
+	if u.GetType() == "bot" {
+		return true
+	}
+
 	if strings.Contains(u.GetBio(), "stale issues") {
 		return true
 	}
@@ -190,15 +204,4 @@ func isBot(u *github.User) bool {
 	}
 
 	return false
-}
-
-// Return if a role is basically a member
-func isMember(role string) bool {
-	// Possible values are "COLLABORATOR", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MEMBER", "OWNER", or "NONE".
-	switch role {
-	case "COLLABORATOR", "MEMBER", "OWNER":
-		return true
-	default:
-		return false
-	}
 }

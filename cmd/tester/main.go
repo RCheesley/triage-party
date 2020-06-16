@@ -23,18 +23,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/triage-party/pkg/initcache"
+	"github.com/google/triage-party/pkg/persist"
 	"github.com/google/triage-party/pkg/triage"
 
-	"github.com/google/go-github/v31/github"
 	"golang.org/x/oauth2"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var (
-	// shared with tester
+	// custom GitHub API URLs
+	githubAPIRawURL = flag.String("github-api-url", "", "base URL for GitHub API.  Please set this when you use GitHub Enterprise. This often is your GitHub Enterprise hostname. If the base URL does not have the suffix \"/api/v3/\", it will be added automatically.")
+
+	// shared with server
 	configPath      = flag.String("config", "", "configuration path")
-	initCachePath   = flag.String("init_cache", "", "Where to load the initial cache from (optional)")
+	persistBackend  = flag.String("persist-backend", "", "Cache persistence backend (disk, mysql, cloudsql)")
+	persistPath     = flag.String("persist-path", "", "Where to persist cache to (automatic)")
 	reposOverride   = flag.String("repos", "", "Override configured repos with this repository (comma separated)")
 	githubTokenFile = flag.String("github-token-file", "", "github token secret file, also settable via GITHUB_TOKEN")
 
@@ -46,8 +49,6 @@ var (
 
 func main() {
 	klog.InitFlags(nil)
-	flag.Set("logtostderr", "false")
-	flag.Set("alsologtostderr", "false")
 	flag.Parse()
 
 	if *configPath == "" {
@@ -59,7 +60,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	client := github.NewClient(oauth2.NewClient(ctx, oauth2.StaticTokenSource(
+	client := triage.MustCreateGithubClient(*githubAPIRawURL, oauth2.NewClient(ctx, oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: triage.MustReadToken(*githubTokenFile, "GITHUB_TOKEN")},
 	)))
 
@@ -68,23 +69,19 @@ func main() {
 		klog.Exitf("open %s: %v", *configPath, err)
 	}
 
-	cachePath := *initCachePath
-	if cachePath == "" {
-		cachePath = initcache.DefaultDiskPath(*configPath, *reposOverride)
-
+	c, err := persist.FromEnv(*persistBackend, *persistPath, *configPath, *reposOverride)
+	if err != nil {
+		klog.Exitf("unable to create persistence layer: %v", err)
 	}
 
-	c := initcache.New(initcache.Config{Type: "disk", Path: cachePath})
 	if err := c.Initialize(); err != nil {
-		klog.Exitf("initcache load to %s: %v", cachePath, err)
+		klog.Exitf("persist initialize from %s: %v", c, err)
 	}
 
 	cfg := triage.Config{
-		Client:          client,
-		Cache:           c,
-		ItemExpiry:      7 * 24 * time.Hour,
-		OrgMemberExpiry: 90 * 24 * time.Hour,
-		DebugNumber:     *number,
+		Client:      client,
+		Cache:       c,
+		DebugNumber: *number,
 	}
 
 	if *reposOverride != "" {
@@ -103,7 +100,7 @@ func main() {
 	}
 
 	if err := c.Save(); err != nil {
-		klog.Exitf("initcache save to %s: %v", cachePath, err)
+		klog.Exitf("persist save to %s: %v", c, err)
 	}
 }
 
