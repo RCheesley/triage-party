@@ -88,6 +88,7 @@ func (h *Engine) updateIssues(ctx context.Context, org string, project string, s
 				continue
 			}
 
+			h.updateMtime(i, i.GetUpdatedAt())
 			h.updateSimilarityTables(i.GetTitle(), i.GetHTMLURL())
 			allIssues = append(allIssues, i)
 		}
@@ -106,11 +107,15 @@ func (h *Engine) updateIssues(ctx context.Context, org string, project string, s
 	return allIssues, start, nil
 }
 
-func (h *Engine) cachedIssueComments(ctx context.Context, org string, project string, num int, newerThan time.Time) ([]*github.IssueComment, time.Time, error) {
+func (h *Engine) cachedIssueComments(ctx context.Context, org string, project string, num int, newerThan time.Time, fetch bool) ([]*github.IssueComment, time.Time, error) {
 	key := fmt.Sprintf("%s-%s-%d-issue-comments", org, project, num)
 
 	if x := h.cache.GetNewerThan(key, newerThan); x != nil {
 		return x.IssueComments, x.Created, nil
+	}
+
+	if !fetch {
+		return nil, time.Time{}, nil
 	}
 
 	klog.V(1).Infof("cache miss for %s newer than %s", key, logu.STime(newerThan))
@@ -172,13 +177,13 @@ func openByDefault(fs []Filter) []Filter {
 	return fs
 }
 
-func (h *Engine) IssueSummary(i *github.Issue, cs []*github.IssueComment) *Conversation {
+func (h *Engine) IssueSummary(i *github.Issue, cs []*github.IssueComment, age time.Time) *Conversation {
 	cl := []*Comment{}
 	for _, c := range cs {
 		cl = append(cl, NewComment(c))
 	}
 
-	co := h.conversation(i, cl)
+	co := h.conversation(i, cl, age)
 	r := i.GetReactions()
 	co.ReactionsTotal += r.GetTotalCount()
 	for k, v := range reactions(r) {

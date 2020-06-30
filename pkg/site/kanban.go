@@ -17,6 +17,7 @@ package site
 import (
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -53,7 +54,7 @@ func groupByUser(results []*triage.RuleResult, milestoneID int, dedup bool) []*S
 
 	for i, r := range results {
 		for _, co := range r.Items {
-			if milestoneID != 0 && co.Milestone.GetNumber() != milestoneID {
+			if milestoneID > 0 && co.Milestone.GetNumber() != milestoneID {
 				continue
 			}
 
@@ -102,7 +103,7 @@ func groupByUser(results []*triage.RuleResult, milestoneID int, dedup bool) []*S
 }
 
 func lateTime(t time.Time, ref time.Time) string {
-	return humanize.RelTime(t, ref, "early", "late")
+	return humanize.CustomRelTime(t, ref, "early", "late", defaultMagnitudes)
 }
 
 // Kanban shows a kanban swimlane view of a collection.
@@ -127,7 +128,7 @@ func (h *Handlers) Kanban() http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/k/")
-		milestoneID := getInt(r.URL, "milestone", 0)
+		milestoneID := getInt(r.URL, "milestone", -1)
 
 		p, err := h.collectionPage(r.Context(), id, isRefresh(r))
 		if err != nil {
@@ -142,13 +143,8 @@ func (h *Handlers) Kanban() http.HandlerFunc {
 		}
 
 		chosen, milestones := milestoneChoices(p.CollectionResult.RuleResults, milestoneID)
-		if chosen.GetNumber() == 0 {
-			klog.Errorf("milestone number is 0, given ID was %s", id)
-			http.Error(w, "milestone not found", 404)
-			return
-		}
 
-		klog.Infof("milestones choices: %+v", milestones)
+		klog.Infof("milestones chosen: %d, choices: %+v", milestoneID, milestones)
 
 		p.Description = p.Collection.Description
 		p.Swimlanes = groupByUser(p.CollectionResult.RuleResults, chosen.GetNumber(), p.Collection.Dedup)
@@ -184,9 +180,16 @@ func calcClosedPerDay(r *triage.CollectionResult) float64 {
 	}
 
 	oldestClosure := time.Now()
+	// dedup
+	seen := map[string]bool{}
 
 	for _, r := range r.RuleResults {
 		for _, co := range r.Items {
+			if seen[co.URL] {
+				continue
+			}
+			seen[co.URL] = true
+
 			if !co.ClosedAt.IsZero() && co.ClosedAt.Before(oldestClosure) {
 				klog.V(1).Infof("#%d was closed at %s", co.ID, co.ClosedAt)
 				oldestClosure = co.ClosedAt
@@ -195,7 +198,7 @@ func calcClosedPerDay(r *triage.CollectionResult) float64 {
 	}
 
 	days := time.Since(oldestClosure).Hours() / 24
-	closeRate := days / float64(r.TotalIssues)
+	closeRate := days / float64(len(seen))
 	klog.Infof("close rate is %.2f (%.1f days of data, %d issues)", closeRate, days, r.TotalIssues)
 	return closeRate
 }
@@ -218,19 +221,31 @@ func calcETA(m *github.Milestone, closeRate float64) (time.Time, time.Duration, 
 		return time.Time{}, time.Duration(0), 0
 	}
 
+	// How many will we get done by the due date?
+	daysToDue := m.GetDueOn().Sub(time.Now()).Hours() / 24
+	canShip := daysToDue * closeRate
+	klog.Errorf("%.2f days until due date, can ship %.2f items", daysToDue, canShip)
+
 	days := float64(open) / closeRate
 	eta := time.Now().AddDate(0, 0, int(days))
+
 	overByDuration := eta.Sub(m.GetDueOn())
-	overByCount := int(overByDuration.Hours() / 24 / closeRate)
+	overByCount := int(math.Ceil(float64(open) - canShip))
 	return eta, overByDuration, overByCount
 }
 
 func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*github.Milestone, []Choice) {
 	mmap := map[int]*github.Milestone{}
 
+	notInMilestone := 0
+
 	for _, r := range results {
 		for _, co := range r.Items {
 			if co.Milestone == nil || co.Milestone.GetNumber() == 0 {
+				if notInMilestone == 0 {
+					klog.Infof("Found issue within %s that is not in a milestone: %s", r.Rule.ID, co.URL)
+				}
+				notInMilestone++
 				continue
 			}
 			mmap[co.Milestone.GetNumber()] = co.Milestone
@@ -249,8 +264,13 @@ func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*github.Mi
 
 	sort.Slice(milestones, func(i, j int) bool { return milestones[i].GetDueOn().Before(milestones[j].GetDueOn()) })
 
-	if milestoneID == 0 {
-		milestoneID = milestones[0].GetNumber()
+	// Only auto-select a milestone if all issues are within a milestone
+	if milestoneID == -1 {
+		if len(milestones) > 0 && notInMilestone == 0 {
+			milestoneID = milestones[0].GetNumber()
+		} else {
+			milestoneID = 0 // all
+		}
 	}
 
 	choices := []Choice{}
@@ -269,6 +289,12 @@ func milestoneChoices(results []*triage.RuleResult, milestoneID int) (*github.Mi
 
 		choices = append(choices, c)
 	}
+
+	choices = append(choices, Choice{
+		Value:    0,
+		Text:     "All items",
+		Selected: milestoneID == 0,
+	})
 
 	return chosen, choices
 }

@@ -36,8 +36,8 @@ type Config struct {
 	// The furthest we will query back for information on closed issues
 	MaxClosedUpdateAge time.Duration
 
-	// DebugNumber is used when you want to debug why a single item is being handled in a certain wait
-	DebugNumber int
+	// DebugNumbers is used when you want to debug why a single item is being handled in a certain wait
+	DebugNumbers map[int]bool
 
 	// MemberRoles are which roles to consider as members
 	// https://developer.github.com/v4/enum/commentauthorassociation/
@@ -58,7 +58,7 @@ type Engine struct {
 	// The furthest we will query back for information on closed issues
 	MaxClosedUpdateAge time.Duration
 
-	debugNumber int
+	debug map[int]bool
 
 	titleToURLs   sync.Map
 	similarTitles sync.Map
@@ -67,7 +67,7 @@ type Engine struct {
 	members     map[string]bool
 
 	// Workaround because GitHub doesn't update issues if cross-references occur
-	latestXref map[string]time.Time
+	updatedAt map[string]time.Time
 
 	// indexes used for similarity matching
 	seen map[string]*Conversation
@@ -81,9 +81,9 @@ func New(cfg Config) *Engine {
 		MaxClosedUpdateAge: cfg.MaxClosedUpdateAge,
 		seen:               map[string]*Conversation{},
 		MinSimilarity:      cfg.MinSimilarity,
-		debugNumber:        cfg.DebugNumber,
+		debug:              cfg.DebugNumbers,
 
-		latestXref:  map[string]time.Time{},
+		updatedAt:   map[string]time.Time{},
 		memberRoles: map[string]bool{},
 		members:     map[string]bool{},
 	}
