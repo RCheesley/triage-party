@@ -1,0 +1,566 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+settings:
+  name: Mautic
+  min_similarity: 0.8
+  repos:
+    - https://github.com/mautic/mautic
+
+  # Who should automatically be considered a project member?
+  # See: https://developer.github.com/v4/enum/commentauthorassociation/
+  # Default is "collaborator, owner, member", unless "members" is set
+  #
+  member-roles:
+   - collaborator
+   - owner
+   - member
+  # Who else do we consider to be a project member? Default is empty.
+  #members:
+  # - tstromberg
+
+collections:
+  - id: daily
+    name: Daily Triage
+    dedup: true
+    description: >
+      Queue to be emptied once a day
+    rules:
+      - issue-needs-level-overdue
+      - issue-needs-comment-overdue
+      # Don't leave code reviews hanging
+      - pr-reviewable
+      # missing initial feedback
+      - issue-needs-level
+      - issue-needs-comment
+      # reprioritize
+      - bug-new-with-reactions
+      - bug-new-with-many-commenters
+      - feature-new-with-reactions
+      - feature-new-with-many-commenters
+      # Don't forget our users
+      - issue-updated-needs-info
+      - issue-updated-has-question
+
+  - id: weekly
+    name: Weekly Triage
+    dedup: true
+    description: >
+      Queue to be emptied once a week in a team triage meeting
+    rules:
+      # Issues needing attention
+      - many-reactions
+      - many-commenters
+      - issue-zombies
+      - issue-next-milestone-no-updates
+      # Issues needing closure
+      - issue-stale-needs-info
+      # PR's needing closure
+      - pr-approved-stale
+      - pr-unapproved-stale
+      # People with questions
+      - issue-has-question
+
+  - id: milestone
+    name: In Milestone
+    description: >
+      A Kanban visualization of milestones, showing the flow of issues through each stage.
+
+        * Unassigned issues represent available work
+        * >3 issues assigned to the same person within a stage signifies a bottleneck 🌊
+    display: kanban
+    overflow: 3
+    dedup: true
+    rules:
+      - milestone-not-started
+      - milestone-assignee-updated
+      - milestone-pr-needs-review
+      - milestone-pr-needs-work
+      - milestone-pr-needs-merge
+      - milestone-recently-closed
+
+  - id: scrub
+    name: Quarterly Scrub
+    dedup: true
+    description: Once every quarter, look for stale issues, reprioritize, and de-duplicate.
+    rules:
+      - features-old-recv
+      - features-old
+      - bugs-old-recv
+      - bugs-old
+      - other-old-recv
+      - other-old
+
+  - id: recv
+    name: "Receive queue"
+    description: >
+      Issues that may be waiting for our response
+    rules:
+      - question-recv
+      - bugs-recv
+      - enhancement-recv
+      - other-recv
+
+  - id: important
+    name: Important
+    description: >
+      Items labeled as essential
+    overflow: 3
+    dedup: true
+    rules:
+      - essential-not-milestoned
+      - essential-milestoned
+      - essential-assignee-updated
+      - essential-pr-needs-review
+      - essential-pr-needs-work
+      - essential-pr-needs-merge
+      - essential-recently-closed
+
+  - id: similar
+    name: Similar
+    description: Items which appear similar to one other. Review for duplicates or vague titles.
+    rules:
+      - similar-prs
+      - similar-issues
+
+  - id: __open__
+    name: All open PR's and Issues that should be considered for repository stats (hidden)
+    used_for_statistics: true
+    hidden: true
+    rules:
+      - open-prs
+      - open-issues
+
+  - id: __velocity__
+    name: issues to include in velocity metrics
+    used_for_statistics: true
+    hidden: true
+    rules:
+      - closed-milestone-issues
+
+rules:
+  ### Daily Triage ####
+  issue-needs-level-overdue:
+    name: "Issues older than 7 days pending triage"
+    resolution: "Add a level or needs-triage label if you are not sure"
+    type: issue
+    filters:
+      - label: "!L.*"
+      - created: +7d
+
+  issue-needs-comment-overdue:
+    name: "Uncommented older than 7 days"
+    resolution: "Add a comment to acknowledge and suggest next steps"
+    type: issue
+    filters:
+      - tag: "!commented"
+      - tag: "recv"
+      - created: +7d
+
+    # Don't leave code reviews hanging
+  pr-reviewable:
+    name: "Pull Requests: Review Ready"
+    resolution: "Review requests or add appropriate labels/comments for next steps"
+    type: pull_request
+    filters:
+      - label: "!has-conflicts"
+      - label: "!needs-rebase"
+      - label: "!needs-automated-tests"
+      - label: "!needs-documentation"
+      - label: "!ready-to-commit"
+      - label: "!ready-to-test"
+      - label: "!WIP"
+      - tag: "!changes-requested"
+      - tag: "!send"
+
+  # Issues missing initial feedback
+  issue-needs-level:
+    name: "Un-triaged Issues"
+    resolution: "Add a level, labels and where appropriate, milestones."
+    type: issue
+    filters:
+      - label: "needs-triage"
+
+  issue-needs-comment:
+    name: "Uncommented Recent Issues"
+    resolution: "Add a comment"
+    type: issue
+    filters:
+      - tag: "!commented"
+      - tag: "recv"
+      - created: -7d
+
+  # Bugs that may need attention
+  bug-new-with-reactions:
+    name: "New bug, has multiple reactions, but not assigned to next milestone"
+    resolution: "Check if issue should be re-prioritized"
+    type: issue
+    filters:
+      - reactions: ">2"
+      - created: -10d
+      - tag: "!send"
+      - label: "Bug"
+      - milestone: "!3.0.2"
+
+  bug-new-with-many-commenters:
+    name: "New bug, has multiple commenters, but not assigned to next milestone"
+    resolution: "Check if issue should be re-prioritized"
+    type: issue
+    filters:
+      - commenters: ">3"
+      - created: -10d
+      - tag: "!send"
+      - label: "Bug"
+      - milestone: "!3.0.2"
+
+  # Features that may need attention
+  feature-new-with-reactions:
+    name: "New feature, has multiple reactions, but not assigned to next milestone"
+    resolution: "Check if issue should be re-prioritized"
+    type: issue
+    filters:
+      - reactions: ">2"
+      - created: -10d
+      - tag: "!send"
+      - label: "feature|enhancement"
+      - milestone: "!3.1"
+
+  feature-new-with-many-commenters:
+    name: "New feature, has multiple commenters, but not assigned to next milestone"
+    resolution: "Check if issue should be re-prioritized"
+    type: issue
+    filters:
+      - commenters: ">3"
+      - created: -10d
+      - tag: "!send"
+      - label: "feature|enhancement"
+      - milestone: "!3.1"
+
+  # Don't forget our users
+  issue-updated-needs-info:
+    name: "Needs information, has update"
+    resolution: "Comment and remove needs-triage or pending-feedback tag"
+    type: issue
+    filters:
+      - label: "needs-triage|pending-feedback"
+      - tag: recv
+
+  issue-updated-has-question:
+    name: "Recently updated issue has a question"
+    resolution: "Add an answer"
+    type: issue
+    filters:
+      - tag: recv-q
+      - label: "!needs-triage"
+      - tag: "!member-last"
+      - tag: "!contributor-last"
+      - responded: +3d
+      - updated: -7d
+
+  ####### Weekly Triage #########
+  # Inactive issues next milestone
+  issue-next-milestone-no-updates:
+    name: "Next milestone, but no updates in 60 days"
+    resolution: "Consider closing or adjusting the milestone"
+    type: issue
+    filters:
+      - milestone: "3.0.1|3.1"
+      - updated: +60d
+
+  # issues needing reprioritization
+  many-reactions:
+    name: "Many reactions, but not in next milestone"
+    resolution: "Consider for next milestone"
+    filters:
+      - reactions: ">3"
+      - reactions-per-month: ">0.75"
+      - milestone: "!3.0.2|!3.1"
+
+  many-commenters:
+    name: "Many commenters, but not in next milestone"
+    resolution: "Consider for next milestone"
+    filters:
+      - commenters: ">2"
+      - commenters-per-month: ">1.9"
+      - created: "+30d"
+      - milestone: "!3.0.2|!3.1"
+
+  issue-zombies:
+    name: "Screaming into the void"
+    resolution: "Reopen, or ask folks to open a new issue"
+    type: issue
+    filters:
+      - state: closed
+      - updated: -7d
+      - tag: recv
+      - comments-while-closed: ">1"
+
+  # Issues needing closure
+  issue-stale-needs-info:
+    name: "Waiting for feedback for for over 2 weeks"
+    resolution: "Close or remove pending-feedback label"
+    type: issue
+    filters:
+      - label: pending-feedback
+      - updated: +13d
+
+  # PR's needing closure
+  pr-approved-stale:
+    name: "Pull requests: Approved and needing to be merged"
+    type: pull_request
+    filters:
+      - label: "!has-conflicts"
+      - label: "!needs-rebase"
+      - label: "approved"
+      - updated: +5d
+
+  pr-unapproved-stale:
+    name: "Pull Requests: Stale"
+    resolution: "Add comment and/or close PR"
+    type: pull_request
+    filters:
+      - created: +20d
+      - updated: +5d
+
+  # People with questions
+  issue-has-question:
+    name: "Overdue answers for a question"
+    resolution: "Add a comment"
+    type: issue
+    filters:
+      - tag: recv-q
+      - label: "!pending-feedback"
+      - tag: "!member-last"
+      - tag: "!contributor-last"
+      - responded: +6d
+
+  ### Milestone Kanban ###
+  milestone-not-started:
+    name: "Not started"
+    type: issue
+    filters:
+      - tag: open-milestone
+      - tag: "!assignee-updated"
+      - tag: "!(assignee-open-pr|assignee-closed-pr)"
+  milestone-assignee-updated:
+    name: "In Progress"
+    type: issue
+    filters:
+      - tag: open-milestone
+      - tag: "assignee-updated"
+      - tag: "!(pr-changes-requested|pr-reviewer-comment|pr-unreviewed|pr-new-commits|pr-approved|pr-changes-requested)"
+  milestone-pr-needs-work:
+    name: "PR needs work"
+    type: issue
+    filters:
+      - tag: open-milestone
+      - tag: "(pr-changes-requested|pr-reviewer-comment)"
+  milestone-pr-needs-review:
+    name: "PR needs Review"
+    type: issue
+    filters:
+      - tag: open-milestone
+      - tag: "(pr-unreviewed|pr-new-commits)"
+  milestone-pr-needs-merge:
+    name: "PR needs Merge"
+    type: issue
+    filters:
+      - tag: open-milestone
+      - tag: "(pr-approved|pr-approved-but-pushed)"
+  milestone-recently-closed:
+    name: "Finish Line"
+    type: issue
+    filters:
+      - tag: open-milestone
+      - state: closed
+      - updated: -30d
+
+  ## Bug Scrub ##
+  bugs-old-recv:
+    name: "Bugs that deserve a follow-up comment"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - responded: +60d
+      - created: +60d
+      - label: "Bug"
+
+  features-old-recv:
+    name: "Features that deserve a follow-up comment"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - responded: +90d
+      - created: +30d
+      - label: "Feature|Enhancement"
+
+  other-old-recv:
+    name: "Other issues that deserve a follow-up comment"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - responded: +60d
+      - label: "!Feature|!Enhancement"
+      - label: "!Bug"
+
+  features-old:
+    name: "Features that have not been commented on within 90 days"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - responded: +90d
+      - created: +90d
+      - label: "Feature|Enhancement"
+
+  bugs-old:
+    name: "Bugs that have not been commented on within 60 days"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - label: "Bug"
+      - responded: +60d
+      - created: +60d
+      - label: "!pending-feedback"
+
+  other-old:
+    name: "Items that have not been commented on within 60 days"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - responded: +90d
+      - created: +90d
+      - label: "!Feature|Enhancement"
+      - label: "!Bug"
+      - label: "!pending-feedback"
+
+  # Receive queue
+  question-recv:
+    name: "Questions awaiting follow-up"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*question"
+
+  bugs-recv:
+    name: "Bugs awaiting follow-up"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*bug"
+
+  enhancement-recv:
+    name: "Features awaiting follow-up"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - label: ".*(feature|enhancement).*"
+
+  other-recv:
+    name: "Items that deserve a follow-up comment"
+    resolution: "Comment or close the issue"
+    type: issue
+    filters:
+      - tag: recv
+      - responded: +30d
+      - label: "!.*(feature|enhancement).*"
+      - label: "!.*bug"
+      - label: ".*question"
+
+  ### Important Kanban ###
+  essential-not-milestoned:
+    name: "Not in milestone"
+    type: issue
+    filters:
+      - label: "essential"
+      - tag: "!open-milestone"
+      - tag: "!assignee-updated"
+      - tag: "!(assignee-open-pr|assignee-closed-pr)"
+  essential-milestoned:
+    name: "In Milestone"
+    type: issue
+    filters:
+      - label: "essential"
+      - tag: open-milestone
+      - tag: "!(pr-changes-requested|pr-reviewer-comment|pr-unreviewed|pr-new-commits|pr-approved|pr-changes-requested|assignee-updated)"
+  essential-assignee-updated:
+    name: "In Progress"
+    type: issue
+    filters:
+      - label: "essential"
+      - tag: "assignee-updated"
+      - tag: "!(pr-changes-requested|pr-reviewer-comment|pr-unreviewed|pr-new-commits|pr-approved|pr-changes-requested)"
+  essential-pr-needs-work:
+    name: "PR needs work"
+    type: issue
+    filters:
+      - label: "essential"
+      - tag: "(pr-changes-requested|pr-reviewer-comment)"
+  essential-pr-needs-review:
+    name: "PR needs Review"
+    type: issue
+    filters:
+      - label: "essential"
+      - tag: "(pr-unreviewed|pr-new-commits)"
+  essential-pr-needs-merge:
+    name: "PR needs Merge"
+    type: issue
+    filters:
+      - label: "essential"
+      - tag: "(pr-approved|pr-approved-but-pushed)"
+  essential-recently-closed:
+    name: "Recently closed"
+    type: issue
+    filters:
+      - label: "essential"
+      - state: closed
+      - updated: -30d
+
+  ## Similar
+  similar-prs:
+    name: "Similar Pull Requests"
+    type: pull_request
+    resolution: Close as duplicate or give a better title
+    filters:
+      - tag: similar
+
+  similar-issues:
+    name: "Similar Issues"
+    type: issue
+    resolution: Close as duplicate or give a better title
+    filters:
+      - tag: similar
+
+  # for statistics generation
+  open-issues:
+    name: "Open Issues"
+    type: issue
+
+  open-prs:
+    name: "Open PRs"
+    type: pull_request
+
+  closed-milestone-issues:
+    name: "Recently closed milestone issues"
+    type: issue
+    filters:
+      - state: closed
+      - closed: -90d
+      - milestone: ".*"
+      - label: "!Duplicate"
